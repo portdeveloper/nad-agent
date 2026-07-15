@@ -115,3 +115,43 @@ export function dispose() {
   }
   manager = account = address = null;
 }
+
+async function fetchHistory(action) {
+  const params = new URLSearchParams({
+    chainid: "10143",
+    module: "account",
+    action,
+    address,
+    startblock: "0",
+    endblock: "999999999",
+    page: "1",
+    offset: "100",
+    sort: "desc",
+    apikey: config.monadscanApiKey,
+  });
+
+  const res = await fetch(
+    `https://api.etherscan.io/v2/api?${params}`
+  );
+
+  const data = await res.json();
+
+  return data.status === "1" ? data.result : [];
+}
+
+
+export async function getHistory() {
+  const [normal, internal, token] = await Promise.all([
+    fetchHistory("txlist"),
+    fetchHistory("txlistinternal"),
+    fetchHistory("tokentx"),
+  ]);
+
+  const all = [...normal, ...internal, ...token];
+
+  all.sort(
+    (a, b) => Number(b.timeStamp) - Number(a.timeStamp)
+  );
+
+  return all;
+}

@@ -30,6 +30,7 @@ const chain = { network, ...NETWORKS[network] };
 if (process.env.MONAD_RPC_URL) chain.rpcUrl = process.env.MONAD_RPC_URL;
 
 const pimlicoKey = process.env.PIMLICO_API_KEY || "";
+const etherscanApiKey = process.env.ETHERSCAN_API_KEY || "";
 const sponsorshipPolicyId = process.env.PIMLICO_SPONSORSHIP_POLICY_ID || "";
 const gasOverride = (process.env.WDK_GAS_MODE || "").toLowerCase();
 
@@ -46,6 +47,7 @@ export const config = {
   chain,
   gasMode,
   sponsorshipPolicyId,
+  etherscanApiKey,
   // ERC-4337 needs a bundler+paymaster. For a LOCAL CLI the Pimlico key stays on
   // this machine, so we can hit Pimlico directly — no server proxy needed (unlike
   // the browser wallet, where the key had to be proxied).

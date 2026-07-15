@@ -63,30 +63,62 @@ const LOGO = [
   "██║ ╚████║██║  ██║██████╔╝",
   "╚═╝  ╚═══╝╚═╝  ╚═╝╚═════╝ ",
 ];
-const GRAD = ["38;5;189", "38;5;147", "38;5;141", "38;5;99", "38;5;99", "38;5;61"];
+const GRAD = [
+  "38;5;189",
+  "38;5;147",
+  "38;5;141",
+  "38;5;99",
+  "38;5;99",
+  "38;5;61",
+];
 
 function statusBlock() {
   const g = config.gasMode;
-  const dot = g === "sponsored" ? c.green("●") : g === "dry-run" ? c.yellow("●") : c.cyan("●");
+  const dot =
+    g === "sponsored"
+      ? c.green("●")
+      : g === "dry-run"
+        ? c.yellow("●")
+        : c.cyan("●");
   const gas =
     g === "sponsored"
       ? c.green("gasless") + c.dim(" · you pay 0 gas")
       : g === "dry-run"
         ? c.yellow("dry-run") + c.dim(" · sends are simulated")
         : c.cyan("native") + c.dim(" · you pay gas in MON");
-  const model = config.model.localPath ? config.model.localPath.split("/").pop() : config.model.name;
-  const row = (label, value) => console.log("   " + c.dim(label.padEnd(8)) + value);
+  const model = config.model.localPath
+    ? config.model.localPath.split("/").pop()
+    : config.model.name;
+  const row = (label, value) =>
+    console.log("   " + c.dim(label.padEnd(8)) + value);
   // Engine first — QVAC is the whole point.
-  row("engine", c.qvac("Tether QVAC") + c.dim(" · on-device inference" + (METAL ? " · Metal GPU" : "")));
+  row(
+    "engine",
+    c.qvac("Tether QVAC") +
+      c.dim(" · on-device inference" + (METAL ? " · Metal GPU" : "")),
+  );
   row("model", c.cyan(model));
-  row("wallet", c.violet("Tether WDK") + c.dim(" · self-custodial Safe ERC-4337"));
-  row("network", c.violet(config.chain.name) + c.dim(` · chainId ${config.chain.chainId}`));
+  row(
+    "wallet",
+    c.violet("Tether WDK") + c.dim(" · self-custodial Safe ERC-4337"),
+  );
+  row(
+    "network",
+    c.violet(config.chain.name) + c.dim(` · chainId ${config.chain.chainId}`),
+  );
   row("rpc", c.gray(config.chain.rpcUrl));
   row("gas", `${dot} ${gas}`);
 }
 
 function banner() {
-  const aside = ["", "", c.violet(c.bold("· agent")), "", c.gray("self-custodial wallet · settles on Monad"), ""];
+  const aside = [
+    "",
+    "",
+    c.violet(c.bold("· agent")),
+    "",
+    c.gray("self-custodial wallet · settles on Monad"),
+    "",
+  ];
   console.log("");
   LOGO.forEach((line, i) => {
     const logo = COLOR ? `\x1b[${GRAD[i]}m${line}\x1b[0m` : line;
@@ -96,15 +128,31 @@ function banner() {
   // The two stars — both Tether. QVAC does the thinking, WDK holds the keys.
   // QVAC tagline is its own positioning (qvac.tether.io): "Decentralized, Local AI".
   const metalBit = METAL ? " on your Metal GPU" : "";
-  console.log("  " + c.qvac("⚡ Tether QVAC") + c.dim(" — Decentralized, Local AI · thinks on-device" + metalBit + ", no cloud"));
-  console.log("  " + c.wdk("◆ Tether WDK") + c.dim("  — self-custodial smart wallet · your keys never leave this device"));
+  console.log(
+    "  " +
+      c.qvac("⚡ Tether QVAC") +
+      c.dim(
+        " — Decentralized, Local AI · thinks on-device" +
+          metalBit +
+          ", no cloud",
+      ),
+  );
+  console.log(
+    "  " +
+      c.wdk("◆ Tether WDK") +
+      c.dim(
+        "  — self-custodial smart wallet · your keys never leave this device",
+      ),
+  );
   console.log("");
   statusBlock();
   console.log("");
 }
 
 async function confirm(question) {
-  const ans = (await rl.question(c.yellow(question + " ") + c.dim("[y/N] "))).trim().toLowerCase();
+  const ans = (await rl.question(c.yellow(question + " ") + c.dim("[y/N] ")))
+    .trim()
+    .toLowerCase();
   return ans === "y" || ans === "yes";
 }
 
@@ -120,7 +168,8 @@ async function handleAction(action) {
   }
   try {
     const out = await runAction(action);
-    if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
+    if (out != null)
+      console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
   } catch (err) {
     console.log(c.red(`  error: ${err.message}`) + "\n");
   }
@@ -134,20 +183,88 @@ async function handleSlash(line) {
       return handleAction({ action: "get_address" });
     case "balance":
       return handleAction({ action: "get_balance" });
+    case "history":
+      try {
+        const txs = await wallet.getHistory();
+
+        if (!txs.length) {
+          console.log(c.dim("  no transactions found\n"));
+          return true;
+        }
+
+        console.log("\n  " + c.violet(c.bold("recent transactions")));
+
+        for (const tx of txs.slice(0, 5)) {
+          const direction =
+            tx.from.toLowerCase() === wallet.getAddress().toLowerCase()
+              ? "OUT"
+              : "IN";
+
+          console.log(
+            "\n  " +
+              c.cyan(tx.hash) +
+              "\n  " +
+              direction +
+              " " +
+              tx.value +
+              " wei" +
+              "\n  " +
+              config.chain.explorerUrl +
+              "/tx/" +
+              tx.hash,
+          );
+        }
+
+        console.log("");
+      } catch (err) {
+        console.log(c.red(`  error: ${err.message}\n`));
+      }
+
+      return true;
     case "send":
-      return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
+      return handleAction({
+        action: "send_mon",
+        to: rest[0],
+        amountMon: rest[1],
+      });
     case "config":
       statusBlock();
       console.log("");
       return true;
     case "help":
       console.log(
-        "\n  " + c.violet(c.bold("commands")) + "\n" +
-          "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
-          "  " + c.cyan("/balance") + c.dim("           MON balance") + "\n" +
-          "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
-          "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
-          "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
+        "\n  " +
+          c.violet(c.bold("commands")) +
+          "\n" +
+          "  " +
+          c.cyan("/address") +
+          c.dim("           the agent's wallet address") +
+          "\n" +
+          "  " +
+          c.cyan("/balance") +
+          c.dim("           MON balance") +
+          "\n" +
+          "  " +
+          c.cyan("/history") +
+          c.dim("           recent transactions") +
+          "\n" +
+          "  " +
+          c.cyan("/send <to> <mon>") +
+          c.dim("   send MON (asks you to confirm)") +
+          "\n" +
+          "  " +
+          c.cyan("/config") +
+          c.dim("  ·  ") +
+          c.cyan("/help") +
+          c.dim("  ·  ") +
+          c.cyan("/exit") +
+          "\n\n" +
+          "  " +
+          c.dim("or just talk — ") +
+          c.qvac("QVAC") +
+          c.dim(" turns it into an action: ") +
+          c.gray('"send 0.1 MON to 0x…"') +
+          "\n",
       );
       return true;
     case "exit":
@@ -163,7 +280,9 @@ async function main() {
   banner();
 
   // 1) Wallet — reads work with just an RPC; writes need Pimlico (else dry-run).
-  process.stdout.write(c.dim("   ") + c.violet("WDK") + c.dim(" · initializing wallet… "));
+  process.stdout.write(
+    c.dim("   ") + c.violet("WDK") + c.dim(" · initializing wallet… "),
+  );
   try {
     const addr = await wallet.initWallet();
     console.log(c.green("ok"));
@@ -171,7 +290,11 @@ async function main() {
     try {
       const bal = await wallet.getBalance();
       const { formatMon } = await import("./format.mjs");
-      console.log("   " + c.dim("balance ") + c.green(`${formatMon(bal)} ${config.chain.symbol}`));
+      console.log(
+        "   " +
+          c.dim("balance ") +
+          c.green(`${formatMon(bal)} ${config.chain.symbol}`),
+      );
     } catch {
       /* balance read is best-effort at startup */
     }
@@ -182,8 +305,14 @@ async function main() {
   }
 
   // 2) Local brain — QVAC loads the model into memory (on-device, no cloud).
-  const modelName = config.model.localPath ? config.model.localPath.split("/").pop() : config.model.name;
-  process.stdout.write(c.dim("   ") + c.qvac("QVAC") + c.dim(` · loading ${modelName}${METAL ? " on Metal" : ""}… `));
+  const modelName = config.model.localPath
+    ? config.model.localPath.split("/").pop()
+    : config.model.name;
+  process.stdout.write(
+    c.dim("   ") +
+      c.qvac("QVAC") +
+      c.dim(` · loading ${modelName}${METAL ? " on Metal" : ""}… `),
+  );
   const t0 = process.hrtime.bigint();
   try {
     await brain.loadBrain();
@@ -191,11 +320,20 @@ async function main() {
     console.log(c.green("ok") + c.dim(` (${secs.toFixed(1)}s)`));
   } catch (err) {
     console.log(c.red("FAILED") + `\n   ${err.message}`);
-    console.log(c.dim("   (you can still use slash-commands; NL requests need the model)") + "\n");
+    console.log(
+      c.dim(
+        "   (you can still use slash-commands; NL requests need the model)",
+      ) + "\n",
+    );
   }
 
   console.log(
-    "\n   " + c.dim("type ") + c.cyan("/help") + c.dim(" for commands, or just talk to it. ") + c.dim("Ctrl-C to quit.") + "\n"
+    "\n   " +
+      c.dim("type ") +
+      c.cyan("/help") +
+      c.dim(" for commands, or just talk to it. ") +
+      c.dim("Ctrl-C to quit.") +
+      "\n",
   );
 
   // Create readline now — after the model load — so it doesn't discard buffered input.
