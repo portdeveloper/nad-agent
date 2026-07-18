@@ -9,11 +9,25 @@
  * wallet is actually needed (and so the doctor/help paths work without it).
  */
 
+import { Contract, JsonRpcProvider, getAddress as checksumAddress } from "ethers";
 import { config } from "./config.mjs";
 
 let manager = null;
 let account = null;
 let address = null;
+let readProvider = null;
+
+const ERC20_ABI = [
+  "function balanceOf(address owner) view returns (uint256)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+  "function name() view returns (string)",
+];
+
+function getReadProvider() {
+  if (!readProvider) readProvider = new JsonRpcProvider(config.chain.rpcUrl, config.chain.chainId);
+  return readProvider;
+}
 
 function buildWalletConfig() {
   const { chain, gasMode, bundlerUrl, sponsorshipPolicyId } = config;
@@ -58,6 +72,28 @@ export function getAddress() {
 export async function getBalance() {
   if (!account) throw new Error("Wallet not initialized");
   return account.getBalance(); // bigint wei
+}
+
+export async function getTokenBalance(tokenAddress, ownerAddress = address) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
+  return BigInt(await token.balanceOf(checksumAddress(ownerAddress)));
+}
+
+export async function getTokenMetadata(tokenAddress) {
+  const address = checksumAddress(tokenAddress);
+  const token = new Contract(address, ERC20_ABI, getReadProvider());
+  const [symbol, decimals, name] = await Promise.allSettled([
+    token.symbol(),
+    token.decimals(),
+    token.name(),
+  ]);
+  return {
+    address,
+    ...(symbol.status === "fulfilled" ? { symbol: String(symbol.value) } : {}),
+    ...(decimals.status === "fulfilled" ? { decimals: Number(decimals.value) } : {}),
+    ...(name.status === "fulfilled" ? { name: String(name.value) } : {}),
+  };
 }
 
 export async function quoteSend(to, valueWei) {
@@ -113,5 +149,10 @@ export function dispose() {
   } catch {
     /* ignore */
   }
-  manager = account = address = null;
+  try {
+    readProvider?.destroy?.();
+  } catch {
+    /* ignore */
+  }
+  manager = account = address = readProvider = null;
 }

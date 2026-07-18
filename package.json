@@ -9,6 +9,7 @@
     "node": ">=22.17"
   },
   "scripts": {
+    "test": "node --test",
     "doctor": "node scripts/doctor.mjs",
     "gen-seed": "node scripts/gen-seed.mjs",
     "fetch-model": "node scripts/fetch-model.mjs",

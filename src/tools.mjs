@@ -9,16 +9,42 @@
 
 import * as wallet from "./wallet.mjs";
 import { config } from "./config.mjs";
-import { parseMon, formatMon, isAddress } from "./format.mjs";
+import { parseMon, formatMon, formatTokenUnits, isAddress } from "./format.mjs";
+import { listKnownTokenSymbols, resolveToken } from "./tokens.mjs";
 
 export const ACTIONS = {
   get_address: { args: [], desc: "Show the agent's own wallet address." },
   get_balance: { args: [], desc: "Show the agent's native MON balance." },
+  get_token_balance: {
+    args: ["token"],
+    desc: "Show an ERC-20 token balance by token symbol or contract address.",
+  },
   send_mon: { args: ["to", "amountMon"], desc: "Send native MON to an address `to`, amount in MON as a string." },
   none: { args: [], desc: "The message is not an on-chain request; just reply in words." },
 };
 
 const SYMBOL = () => config.chain.symbol;
+const isNativeToken = (token) => String(token ?? "").trim().toUpperCase() === SYMBOL();
+const ADDRESS_RE = /0x[0-9a-fA-F]{40}/;
+const looksLikeBalanceQuestion = (text) => /\b(balance|bal|holding|holdings)\b/i.test(text);
+
+function parseTokenBalancePhrase(text) {
+  if (!looksLikeBalanceQuestion(text)) return null;
+
+  const address = text.match(ADDRESS_RE)?.[0];
+  if (address) return { action: "get_token_balance", token: address };
+
+  const upper = text.toUpperCase();
+  if (new RegExp(`\\b${SYMBOL()}\\b`).test(upper)) return { action: "get_balance" };
+
+  for (const symbol of listKnownTokenSymbols()) {
+    if (new RegExp(`\\b${symbol}\\b`).test(upper)) {
+      return { action: "get_token_balance", token: symbol };
+    }
+  }
+
+  return null;
+}
 
 /** Build the system prompt describing the tool protocol. */
 export function systemPrompt() {
@@ -40,13 +66,28 @@ export function parseAction(text) {
   if (m) {
     try {
       const obj = JSON.parse(m[0]);
+      const token = obj.token ?? obj.symbol ?? obj.tokenAddress;
+      if (obj.action === "get_balance" && token && !isNativeToken(token)) {
+        return { action: "get_token_balance", token };
+      }
       if (obj.action && ACTIONS[obj.action]) return obj;
     } catch {
       /* fall through to the lenient path */
     }
   }
-  // Small models often emit `get_balance()` instead of JSON. Recognize a READ-ONLY
-  // action name in the text — but never auto-trigger a write (send needs real args).
+  // Small models often emit `get_balance()` instead of JSON. Recognize READ-ONLY
+  // action names in the text — but never auto-trigger a write (send needs real args).
+  const tokenBalanceCall = text.match(/\bget_token_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
+  if (tokenBalanceCall) return { action: "get_token_balance", token: tokenBalanceCall[1] };
+  const balanceWithTokenCall = text.match(/\bget_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
+  if (balanceWithTokenCall) {
+    const token = balanceWithTokenCall[1];
+    return isNativeToken(token) ? { action: "get_balance" } : { action: "get_token_balance", token };
+  }
+
+  const tokenBalancePhrase = parseTokenBalancePhrase(text);
+  if (tokenBalancePhrase) return tokenBalancePhrase;
+
   for (const name of ["get_balance", "get_address"]) {
     if (new RegExp(`\\b${name}\\b`).test(text)) return { action: name };
   }
@@ -65,6 +106,8 @@ export function describeAction(a) {
       return "Read: your wallet address";
     case "get_balance":
       return "Read: your MON balance";
+    case "get_token_balance":
+      return `Read: your ${a.token ?? a.symbol ?? a.tokenAddress ?? "token"} token balance`;
     case "send_mon":
       return `Send ${a.amountMon} ${SYMBOL()} -> ${a.to}` +
         (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
@@ -82,6 +125,36 @@ export async function runAction(a) {
     case "get_balance": {
       const bal = await wallet.getBalance();
       return `${formatMon(bal)} ${SYMBOL()}`;
+    }
+
+    case "get_token_balance": {
+      const input = a.token ?? a.symbol ?? a.tokenAddress ?? "";
+      if (isNativeToken(input)) {
+        const bal = await wallet.getBalance();
+        return `${formatMon(bal)} ${SYMBOL()}`;
+      }
+      const token = resolveToken(input);
+      if (!token) {
+        const known = listKnownTokenSymbols();
+        const hint = known.length ? ` Known ${config.chain.network} symbols: ${known.join(", ")}.` : "";
+        return `Unknown token "${String(input).trim()}" on ${config.chain.name}. Use a token contract address.${hint}`;
+      }
+
+      let { symbol, decimals, name } = token;
+      if (!symbol || !Number.isInteger(decimals)) {
+        const metadata = await wallet.getTokenMetadata(token.address);
+        symbol ??= metadata.symbol;
+        decimals ??= metadata.decimals;
+        name ??= metadata.name;
+      }
+      if (!Number.isInteger(decimals)) {
+        return `Refused: token ${token.address} does not expose decimals().`;
+      }
+
+      const bal = await wallet.getTokenBalance(token.address);
+      const label = symbol || token.address;
+      const detail = name && name !== label ? ` (${name})` : "";
+      return `${formatTokenUnits(bal, decimals)} ${label}${detail}\n  token: ${token.address}`;
     }
 
     case "send_mon": {

@@ -5,7 +5,7 @@
  * Imports src/tools.mjs directly — no build step, no model needed.
  */
 
-import { describe, it } from "node:test";
+import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
 import { ACTIONS, parseAction, isWrite, describeAction, systemPrompt, runAction } from "../src/tools.mjs";
 import { config } from "../src/config.mjs";
@@ -176,4 +176,58 @@ describe("runAction — guards", () => {
   it("none returns null so the caller falls back to chat", async () => {
     assert.equal(await runAction({ action: "none" }), null);
   });
+});
+
+// --- ERC-20 token balance reads (PR #25) ---
+import { resolveToken } from "../src/tokens.mjs";
+
+test("parseAction accepts token-balance JSON", () => {
+  assert.deepEqual(parseAction('{"action":"get_token_balance","token":"USDC"}'), {
+    action: "get_token_balance",
+    token: "USDC",
+  });
+});
+
+test("parseAction treats get_balance with token args as token balance", () => {
+  assert.deepEqual(parseAction('{"action":"get_balance","token":"USDC"}'), {
+    action: "get_token_balance",
+    token: "USDC",
+  });
+  assert.deepEqual(parseAction('get_balance("USDT")'), {
+    action: "get_token_balance",
+    token: "USDT",
+  });
+});
+
+test("parseAction preserves native balance and address fallbacks", () => {
+  assert.deepEqual(parseAction("get_balance()"), { action: "get_balance" });
+  assert.deepEqual(parseAction('get_balance("MON")'), { action: "get_balance" });
+  assert.deepEqual(parseAction('{"action":"get_balance","token":"MON"}'), { action: "get_balance", token: "MON" });
+  assert.deepEqual(parseAction("what is my MON balance?"), { action: "get_balance" });
+  assert.deepEqual(parseAction("please call get_address"), { action: "get_address" });
+});
+
+test("parseAction detects token balance phrases", () => {
+  assert.deepEqual(parseAction("what's my USDC balance?"), {
+    action: "get_token_balance",
+    token: "USDC",
+  });
+  assert.deepEqual(parseAction("balance of 0x000000000000000000000000000000000000dEaD"), {
+    action: "get_token_balance",
+    token: "0x000000000000000000000000000000000000dEaD",
+  });
+});
+
+test("parseAction never guesses a send from free text", () => {
+  assert.deepEqual(parseAction("send 1 MON to 0x000000000000000000000000000000000000dEaD"), {
+    action: "none",
+  });
+});
+
+test("resolveToken supports built-in testnet symbols and raw addresses", () => {
+  assert.equal(resolveToken("usdc", "testnet").symbol, "USDC");
+  assert.equal(
+    resolveToken("0x000000000000000000000000000000000000dEaD", "testnet").address,
+    "0x000000000000000000000000000000000000dEaD",
+  );
 });

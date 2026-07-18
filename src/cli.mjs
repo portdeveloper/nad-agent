@@ -6,7 +6,7 @@
  *
  * Reliable slash-commands bypass the model entirely:
  *   /address           show the agent's wallet address
- *   /balance           show MON balance
+ *   /balance [token]   show native MON or ERC-20 token balance
  *   /send <to> <mon>   send MON (asks for confirmation)
  *   /config /help /exit
  */
@@ -210,7 +210,9 @@ async function handleSlash(line) {
     case "address":
       return handleAction({ action: "get_address" });
     case "balance":
-      return handleAction({ action: "get_balance" });
+      return rest.length
+        ? handleAction({ action: "get_token_balance", token: rest.join(" ") })
+        : handleAction({ action: "get_balance" });
     case "send":
       return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
     case "config":
@@ -221,7 +223,7 @@ async function handleSlash(line) {
       console.log(
         "\n  " + c.violet(c.bold("commands")) + "\n" +
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
-          "  " + c.cyan("/balance") + c.dim("           MON balance") + "\n" +
+          "  " + c.cyan("/balance [token]") + c.dim("   native MON or ERC-20 balance") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
           "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
           "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
