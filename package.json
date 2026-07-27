@@ -15,7 +15,8 @@
     "build": "node scripts/build.mjs",
     "start": "node --env-file-if-exists=.env dist/cli.mjs",
     "smoke": "node --env-file-if-exists=.env dist/e2e.mjs",
-    "dev": "node scripts/build.mjs && node --env-file-if-exists=.env dist/cli.mjs"
+    "dev": "node scripts/build.mjs && node --env-file-if-exists=.env dist/cli.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@qvac/sdk": "^0.14.1",
