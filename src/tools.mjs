@@ -7,9 +7,33 @@
  * or the official @tetherto/wdk-mcp-toolkit MCP server — see README "Upgrade path".
  */
 
+import { readFileSync } from "node:fs";
 import * as wallet from "./wallet.mjs";
 import { config } from "./config.mjs";
 import { parseMon, formatMon, isAddress } from "./format.mjs";
+
+/** Load the address book once (missing file is fine — returns empty object). */
+function loadAddressBook() {
+  try {
+    return JSON.parse(readFileSync(config.addressBookPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Resolve a name or raw address to a 0x address.
+ * Returns { address, name } on success, or { error } if the name is unknown.
+ */
+export function resolveAddress(input) {
+  if (!input) return { error: "No recipient specified." };
+  const trimmed = input.trim();
+  if (isAddress(trimmed)) return { address: trimmed, name: null };
+  const book = loadAddressBook();
+  const found = book[trimmed] ?? book[trimmed.toLowerCase()];
+  if (found && isAddress(found)) return { address: found, name: trimmed };
+  return { error: `"${trimmed}" is not a known address-book name and is not a valid 0x address.` };
+}
 
 export const ACTIONS = {
   get_address: { args: [], desc: "Show the agent's own wallet address." },
@@ -65,9 +89,14 @@ export function describeAction(a) {
       return "Read: your wallet address";
     case "get_balance":
       return "Read: your MON balance";
-    case "send_mon":
-      return `Send ${a.amountMon} ${SYMBOL()} -> ${a.to}` +
+    case "send_mon": {
+      const resolved = resolveAddress(a.to);
+      const dest = resolved.name
+        ? `${resolved.name} (${resolved.address})`
+        : (resolved.address ?? a.to);
+      return `Send ${a.amountMon} ${SYMBOL()} -> ${dest}` +
         (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
+    }
     default:
       return "No on-chain action";
   }
@@ -85,26 +114,28 @@ export async function runAction(a) {
     }
 
     case "send_mon": {
-      if (!isAddress(a.to)) return `Refused: "${a.to}" is not a valid address.`;
+      const resolved = resolveAddress(a.to);
+      if (resolved.error) return `Refused: ${resolved.error}`;
+      const { address, name } = resolved;
       const value = parseMon(a.amountMon);
-      const res = await wallet.send(a.to, value);
+      const res = await wallet.send(address, value);
+      const dest = name ? `${name} (${address})` : address;
       if (res.dryRun) {
         return (
-          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${a.to}\n` +
+          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${dest}\n` +
           `  (est. fee ${formatMon(res.fee)} ${SYMBOL()}). Set PIMLICO_API_KEY in .env to broadcast for real.`
         );
       }
       if (res.hash) {
         const url = `${config.chain.explorerUrl}/tx/${res.hash}`;
         return (
-          `Sent ${a.amountMon} ${SYMBOL()} to ${a.to}\n` +
+          `Sent ${a.amountMon} ${SYMBOL()} to ${dest}\n` +
           `  tx:     ${res.hash}\n  ${url}\n` +
           `  userOp: ${res.userOpHash}`
         );
       }
-      // Broadcast, but the receipt hasn't landed within the wait window.
       return (
-        `Submitted ${a.amountMon} ${SYMBOL()} to ${a.to} (gasless UserOp)\n` +
+        `Submitted ${a.amountMon} ${SYMBOL()} to ${dest} (gasless UserOp)\n` +
         `  userOp: ${res.userOpHash}\n` +
         `  (not confirmed on-chain yet — should land shortly; re-check /balance)`
       );

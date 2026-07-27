@@ -8,6 +8,9 @@
  * at a Monad RPC + chainId — values from docs.monad.xyz.
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 const NETWORKS = {
   testnet: {
     chainId: 10143,
@@ -62,6 +65,7 @@ export const config = {
     maxTokens: Number(process.env.QVAC_MAX_TOKENS || 256),
   },
   hasPimlicoKey: !!pimlicoKey,
+  addressBookPath: process.env.NAD_ADDRESSBOOK || join(homedir(), ".nad-agent", "addressbook.json"),
 };
 
 export function describeConfig() {
