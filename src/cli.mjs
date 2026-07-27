@@ -112,6 +112,9 @@ async function confirm(question) {
 async function handleAction(action) {
   if (action.action === "none") return false;
   if (isWrite(action.action)) {
+    if (config.chain.network === "mainnet") {
+      console.log("\n  " + c.red(c.bold("⚠  MAINNET: this send uses real funds. Verify the address and amount.")));
+    }
     console.log("\n  " + c.yellow(describeAction(action)));
     if (!(await confirm("  confirm?"))) {
       console.log(c.dim("  cancelled.") + "\n");

@@ -25,7 +25,12 @@ const NETWORKS = {
   },
 };
 
-const network = process.env.MONAD_NETWORK === "mainnet" ? "mainnet" : "testnet";
+const rawNetwork = process.env.MONAD_NETWORK || "testnet";
+if (!NETWORKS[rawNetwork]) {
+  console.error(`nad-agent: unknown MONAD_NETWORK "${rawNetwork}" (valid values: ${Object.keys(NETWORKS).join(", ")})`);
+  process.exit(1);
+}
+const network = rawNetwork;
 const chain = { network, ...NETWORKS[network] };
 if (process.env.MONAD_RPC_URL) chain.rpcUrl = process.env.MONAD_RPC_URL;
 
