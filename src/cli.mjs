@@ -23,8 +23,9 @@ import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
 import {
   ACTIONS,
+  NATIVE_TOOLS,
   systemPrompt,
-  parseAction,
+  resolveAction,
   runAction,
   describeAction,
   isWrite,
@@ -201,7 +202,8 @@ async function main() {
   // Create readline now — after the model load — so it doesn't discard buffered input.
   rl = createInterface({ input: stdin, output: stdout });
 
-  const history = [{ role: "system", content: systemPrompt() }];
+  const nativeTools = brain.usesNativeTools();
+  const history = [{ role: "system", content: systemPrompt(nativeTools) }];
 
   let closed = false;
   rl.on("close", () => {
@@ -225,21 +227,22 @@ async function main() {
     }
 
     // Natural language -> ask the local model for an action. The model's raw output
-    // (thinking + JSON) streams dimmed; the executed result prints bright below it.
+    // (thinking + JSON, or a native tool-call frame) streams dimmed; the executed
+    // result prints bright below it.
     history.push({ role: "user", content: line });
     process.stdout.write("  " + DIM);
-    let raw = "";
+    let res;
     try {
-      raw = await brain.complete(history, (t) => process.stdout.write(t));
+      res = await brain.complete(history, (t) => process.stdout.write(t), nativeTools ? NATIVE_TOOLS : undefined);
       process.stdout.write(RST + "\n");
     } catch (err) {
       process.stdout.write(RST);
       console.log(c.red(`  model error: ${err.message}`) + "\n");
       continue;
     }
-    history.push({ role: "assistant", content: raw });
+    history.push({ role: "assistant", content: res.text });
 
-    const action = parseAction(raw);
+    const action = resolveAction(res);
     const handled = await handleAction(action);
     if (!handled) console.log(""); // model chose to just chat; its text already streamed
   }

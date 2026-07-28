@@ -1,10 +1,16 @@
 /**
  * The wallet "tools" the agent can invoke, plus the NL->action interpreter.
  *
- * Design note: v0 uses a model-agnostic JSON-action protocol (works even on a
- * 360M dev model) rather than betting on any one model's native tool-calling.
- * On a big model (GPT_OSS_20B) you can swap this for QVAC's native tool calling
- * or the official @tetherto/wdk-mcp-toolkit MCP server — see README "Upgrade path".
+ * v1 design (this change): when the model supports native tool-calling (its
+ * GGUF chat template renders tools, e.g. Qwen3 or a Llama-3.x tool finetune),
+ * we pass Tool[] declarations to completion({ tools }) and read structured
+ * ToolCall[] responses. Otherwise we fall back to the v0 JSON-action protocol
+ * (works on SmolLM2-360M). Both paths produce the same action object, so the
+ * confirm-and-run flow downstream is untouched.
+ *
+ * To force a path: NAD_TOOLCALLING=native (always declare tools; a model whose
+ * template can't render them just answers in prose and nothing is routed) or
+ * NAD_TOOLCALLING=legacy (always v0 JSON). Unset = auto-detect in agent.mjs.
  */
 
 import * as wallet from "./wallet.mjs";
@@ -18,20 +24,88 @@ export const ACTIONS = {
   none: { args: [], desc: "The message is not an on-chain request; just reply in words." },
 };
 
+// QVAC native tool declarations: Tool[] with JSON Schema parameters. The SDK
+// accepts either this shape or a ToolInput with Zod schemas; we go SDK-native.
+export const NATIVE_TOOLS = [
+  {
+    type: "function",
+    name: "get_address",
+    description: "Show the agent's own wallet address.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    type: "function",
+    name: "get_balance",
+    description: "Show the agent's native MON balance.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    type: "function",
+    name: "send_mon",
+    description: "Send native MON to an address.",
+    parameters: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient 0x address" },
+        amountMon: { type: "string", description: "Amount in MON, as a string (e.g. '0.5')" },
+      },
+      required: ["to", "amountMon"],
+    },
+  },
+];
+
 const SYMBOL = () => config.chain.symbol;
 
-/** Build the system prompt describing the tool protocol. */
-export function systemPrompt() {
+/** Build the system prompt describing the tool protocol (v0 JSON or native). */
+export function systemPrompt(nativeTools) {
+  const base = `You are nad-agent, a wallet assistant on ${config.chain.name}. You control a self-custodial smart account.`;
+  if (nativeTools) {
+    return (
+      base +
+      ` When the user wants an on-chain action, use the provided tools. If it isn't an on-chain request, reply in words.`
+    );
+  }
   const list = Object.entries(ACTIONS)
     .map(([name, { args, desc }]) => `- ${name}(${args.join(", ")}): ${desc}`)
     .join("\n");
   return (
-    `You are nad-agent, a wallet assistant on ${config.chain.name}. You control a ` +
-    `self-custodial smart account. When the user wants an on-chain action, respond ` +
-    `with ONE line of JSON and nothing else, e.g. {"action":"send_mon","to":"0x...","amountMon":"0.5"}.\n` +
+    base +
+    ` When the user wants an on-chain action, respond with ONE line of JSON and nothing else, e.g. {"action":"send_mon","to":"0x...","amountMon":"0.5"}.\n` +
     `Available actions:\n${list}\n` +
     `If it isn't an on-chain request, use {"action":"none"}. Never invent addresses.`
   );
+}
+
+/**
+ * Turn a `complete()` result into an action. This is the one place that decides
+ * which protocol read the model, so both the REPL and the smoke agree.
+ *
+ * On the native path `toolCalls` is authoritative and an empty array means "the
+ * model chose to chat". We must not string-parse the text in that case: a
+ * reasoning model narrates the tools it considered ("There's a function called
+ * get_balance…") and parseAction's lenient branch matches a bare action name
+ * anywhere in the text, so it would run a read the model never requested.
+ */
+export function resolveAction(res) {
+  if (res.native) {
+    return res.toolCalls.length > 0 ? actionFromToolCall(res.toolCalls[0]) : { action: "none" };
+  }
+  return parseAction(res.text);
+}
+
+/**
+ * Map a QVAC native ToolCall to the same action object the v0 parser produces,
+ * so the confirm-and-run path downstream doesn't care which path produced it.
+ * Unknown names (a model inventing a tool) degrade to {action:"none"}.
+ */
+export function actionFromToolCall(call) {
+  if (!call || !ACTIONS[call.name]) return { action: "none" };
+  const args = call.arguments ?? {};
+  const action = { action: call.name };
+  for (const key of ACTIONS[call.name].args) {
+    if (args[key] != null) action[key] = String(args[key]);
+  }
+  return action;
 }
 
 /** Extract an action from a model response: JSON first, then a lenient fallback. */

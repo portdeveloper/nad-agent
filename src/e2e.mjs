@@ -7,7 +7,7 @@
 import { config, describeConfig } from "./config.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
-import { systemPrompt, parseAction, runAction } from "./tools.mjs";
+import { NATIVE_TOOLS, systemPrompt, resolveAction, runAction } from "./tools.mjs";
 
 const TEST_ADDR = "0x000000000000000000000000000000000000dEaD";
 const log = (s = "") => console.log(s);
@@ -32,16 +32,19 @@ log("\nloading local model…");
 const t0 = process.hrtime.bigint();
 await brain.loadBrain();
 log(`model ready (${(Number(process.hrtime.bigint() - t0) / 1e9).toFixed(1)}s)`);
+const nativeTools = brain.usesNativeTools();
+log(`tool-calling: ${nativeTools ? "native (completion({ tools }))" : "legacy (v0 JSON protocol)"}`);
 
 for (const q of ["what is my MON balance?", `send 0.05 MON to ${TEST_ADDR}`]) {
   log(`\nNL › "${q}"`);
   const history = [
-    { role: "system", content: systemPrompt() },
+    { role: "system", content: systemPrompt(nativeTools) },
     { role: "user", content: q },
   ];
-  const raw = await brain.complete(history);
-  log("  model raw:    " + JSON.stringify(raw.slice(0, 160)));
-  const action = parseAction(raw);
+  const res = await brain.complete(history, undefined, nativeTools ? NATIVE_TOOLS : undefined);
+  log("  model raw:    " + JSON.stringify(res.text.slice(0, 160)));
+  const action = resolveAction(res);
+  log("  via:          " + (res.native ? `native (${res.toolCalls.length} toolCall)` : "legacy parse"));
   log("  parsed:       " + JSON.stringify(action));
   const out = await runAction(action);
   if (out != null) log("  result:       " + indent(out).trim());
