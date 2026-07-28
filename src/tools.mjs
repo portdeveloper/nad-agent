@@ -7,6 +7,7 @@
  * or the official @tetherto/wdk-mcp-toolkit MCP server — see README "Upgrade path".
  */
 
+import { getAddress } from "ethers";
 import * as wallet from "./wallet.mjs";
 import { config } from "./config.mjs";
 import { parseMon, formatMon, isAddress } from "./format.mjs";
@@ -58,6 +59,95 @@ export function isWrite(action) {
   return action === "send_mon";
 }
 
+/**
+ * Validate and checksum a send recipient.
+ * Returns { address } on success or { error } if the input is not a valid address.
+ * A typo'd checksum (wrong case on a mixed-case address) is rejected here before
+ * the confirmation prompt, satisfying the acceptance criterion.
+ */
+export function resolveRecipient(raw) {
+  if (!raw || !isAddress(raw.trim())) {
+    return { error: `"${raw}" is not a valid 0x address.` };
+  }
+  try {
+    return { address: getAddress(raw.trim()) }; // throws on bad checksum
+  } catch {
+    return { error: `"${raw}" has an invalid checksum. Did you mean ${getAddress(raw.trim().toLowerCase())}?` };
+  }
+}
+
+/**
+ * Build the pre-send confirmation block. Returns { block, to, amountWei } or
+ * { error } when the recipient or amount is invalid. Called by cli.mjs before
+ * the yes/no prompt so the user sees exactly what is about to happen. One
+ * balance read is done here (plus a fee quote in dry-run); no further RPC
+ * calls are made before the send executes.
+ */
+export async function buildConfirmBlock(a) {
+  const { address: to, error } = resolveRecipient(a.to);
+  if (error) return { error };
+
+  let amountWei;
+  try {
+    amountWei = parseMon(a.amountMon);
+    if (amountWei <= 0n) return { error: `amount must be positive, got "${a.amountMon}".` };
+  } catch {
+    return { error: `"${a.amountMon}" is not a valid ${SYMBOL()} amount.` };
+  }
+  const sym = SYMBOL();
+
+  // What the balance arrow means per mode:
+  //   sponsored -> paymaster covers gas, so after = before - amount exactly
+  //   dry-run   -> nothing broadcasts; the arrow is a simulation
+  //   native    -> gas comes out of the balance too, on top of the amount
+  const balanceNote =
+    config.gasMode === "sponsored" ? " (no gas deducted, sponsored)"
+    : config.gasMode === "dry-run" ? " (simulated)"
+    : " (plus gas)";
+
+  // One balance read — used for both current and post-send display.
+  let balBefore = null;
+  let balAfterStr = "unknown";
+  try {
+    balBefore = await wallet.getBalance();
+    const postSend = balBefore - amountWei;
+    balAfterStr = postSend < 0n
+      ? `${formatMon(postSend)} ${sym} — insufficient balance`
+      : `${formatMon(postSend)} ${sym}${balanceNote}`;
+  } catch {
+    /* balance read is best-effort */
+  }
+
+  const gasLine =
+    config.gasMode === "sponsored"
+      ? "gasless via paymaster (you pay 0 gas)"
+      : config.gasMode === "dry-run"
+        ? "dry-run simulation (no broadcast)"
+        : "native gas (deducted from your balance in MON)";
+
+  // Dry-run: attempt a fee quote so the user sees the simulated outcome.
+  let simulationLine = null;
+  if (config.gasMode === "dry-run") {
+    try {
+      const q = await wallet.quoteSend(to, amountWei);
+      const fee = BigInt(q?.fee ?? 0);
+      simulationLine = `simulated outcome: would send ${a.amountMon} ${sym}, est. fee ${formatMon(fee)} ${sym}`;
+    } catch {
+      simulationLine = "simulated outcome: fee estimation unavailable (no bundler in dry-run)";
+    }
+  }
+
+  const lines = [
+    `recipient : ${to}`,
+    `amount    : ${a.amountMon} ${sym}`,
+    `balance   : ${balBefore !== null ? `${formatMon(balBefore)} ${sym}` : "unknown"} -> ${balAfterStr}`,
+    `gas       : ${gasLine}`,
+  ];
+  if (simulationLine) lines.push(simulationLine);
+
+  return { block: lines.join("\n"), to, amountWei };
+}
+
 /** Human-readable preview of what an action will do (shown before confirmation). */
 export function describeAction(a) {
   switch (a.action) {
@@ -85,26 +175,27 @@ export async function runAction(a) {
     }
 
     case "send_mon": {
-      if (!isAddress(a.to)) return `Refused: "${a.to}" is not a valid address.`;
+      const { address: to, error } = resolveRecipient(a.to);
+      if (error) return `Refused: ${error}`;
       const value = parseMon(a.amountMon);
-      const res = await wallet.send(a.to, value);
+      const res = await wallet.send(to, value);
       if (res.dryRun) {
         return (
-          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${a.to}\n` +
+          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${to}\n` +
           `  (est. fee ${formatMon(res.fee)} ${SYMBOL()}). Set PIMLICO_API_KEY in .env to broadcast for real.`
         );
       }
       if (res.hash) {
         const url = `${config.chain.explorerUrl}/tx/${res.hash}`;
         return (
-          `Sent ${a.amountMon} ${SYMBOL()} to ${a.to}\n` +
+          `Sent ${a.amountMon} ${SYMBOL()} to ${to}\n` +
           `  tx:     ${res.hash}\n  ${url}\n` +
           `  userOp: ${res.userOpHash}`
         );
       }
       // Broadcast, but the receipt hasn't landed within the wait window.
       return (
-        `Submitted ${a.amountMon} ${SYMBOL()} to ${a.to} (gasless UserOp)\n` +
+        `Submitted ${a.amountMon} ${SYMBOL()} to ${to} (gasless UserOp)\n` +
         `  userOp: ${res.userOpHash}\n` +
         `  (not confirmed on-chain yet — should land shortly; re-check /balance)`
       );

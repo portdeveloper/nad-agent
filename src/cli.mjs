@@ -26,7 +26,7 @@ import {
   systemPrompt,
   parseAction,
   runAction,
-  describeAction,
+  buildConfirmBlock,
   isWrite,
 } from "./tools.mjs";
 
@@ -112,8 +112,13 @@ async function confirm(question) {
 async function handleAction(action) {
   if (action.action === "none") return false;
   if (isWrite(action.action)) {
-    console.log("\n  " + c.yellow(describeAction(action)));
-    if (!(await confirm("  confirm?"))) {
+    const preview = await buildConfirmBlock(action);
+    if (preview.error) {
+      console.log(c.red(`  refused: ${preview.error}`) + "\n");
+      return true;
+    }
+    console.log("\n" + preview.block.split("\n").map((l) => "  " + c.cyan(l)).join("\n") + "\n");
+    if (!(await confirm("  send?"))) {
       console.log(c.dim("  cancelled.") + "\n");
       return true;
     }
