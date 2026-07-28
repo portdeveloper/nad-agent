@@ -9,11 +9,20 @@
  * wallet is actually needed (and so the doctor/help paths work without it).
  */
 
+import { Contract, Interface, JsonRpcProvider } from "ethers";
 import { config } from "./config.mjs";
 
 let manager = null;
 let account = null;
 let address = null;
+
+// Minimal ERC-20 surface: the transfer we send plus the metadata reads we need.
+const ERC20_ABI = [
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+];
+const erc20 = new Interface(ERC20_ABI);
 
 function buildWalletConfig() {
   const { chain, gasMode, bundlerUrl, sponsorshipPolicyId } = config;
@@ -107,11 +116,77 @@ async function waitForUserOpTxHash(userOpHash, { tries = 40, delayMs = 1500 } = 
   return null; // not included within the window; caller falls back to the userOpHash
 }
 
+// ── ERC-20 ──────────────────────────────────────────────────────────────────
+// Token reads go straight to Monad's RPC (no wallet/bundler needed), same as
+// native balance reads. Lazily created; recreated if the config's RPC changes.
+let provider = null;
+function rpcProvider() {
+  if (!provider) provider = new JsonRpcProvider(config.chain.rpcUrl, config.chain.chainId);
+  return provider;
+}
+
+/**
+ * Read a token's on-chain metadata: { decimals, symbol }. Throws if the address
+ * has no code (typo, wrong network) so we never "transfer" into an EOA.
+ */
+export async function getTokenMeta(token) {
+  const p = rpcProvider();
+  const code = await p.getCode(token);
+  if (!code || code === "0x") {
+    throw new Error(`no contract at ${token} on ${config.chain.name} — wrong address or network?`);
+  }
+  const c = new Contract(token, ERC20_ABI, p);
+  const [decimals, symbol] = await Promise.all([
+    c.decimals().catch(() => {
+      throw new Error(`${token} does not expose decimals() — not an ERC-20?`);
+    }),
+    c.symbol().catch(() => ""), // symbol is optional in the standard; degrade gracefully
+  ]);
+  return { decimals: Number(decimals), symbol };
+}
+
+/**
+ * Broadcast (or, in dry-run, simulate) an ERC-20 transfer. The userOp calls the
+ * token contract (`to` = token, value 0) with transfer(recipient, amount) calldata
+ * — amount already in the token's base units.
+ * Returns { dryRun } | { userOpHash, hash, fee }.
+ */
+export async function sendToken(token, recipient, amount) {
+  if (!account) throw new Error("Wallet not initialized");
+  const tx = {
+    to: token,
+    value: 0n,
+    data: erc20.encodeFunctionData("transfer", [recipient, amount]),
+  };
+  if (config.gasMode === "dry-run") {
+    // Best-effort quote so the dry-run still exercises the estimation path.
+    let fee = 0n;
+    try {
+      const q = await account.quoteSendTransaction(tx);
+      fee = BigInt(q?.fee ?? 0);
+    } catch {
+      /* estimation may need a bundler; ignore in dry-run */
+    }
+    return { dryRun: true, token, recipient, amount, fee };
+  }
+  const res = await account.sendTransaction(tx);
+  // Same ERC-4337 gotcha as the native path: res.hash is the userOpHash, not the
+  // on-chain tx hash. Resolve the real one from the userOp receipt.
+  const userOpHash = res.hash;
+  const hash = await waitForUserOpTxHash(userOpHash);
+  return { userOpHash, hash, fee: BigInt(res.fee ?? 0) };
+}
+
 export function dispose() {
   try {
     account?.dispose?.();
   } catch {
     /* ignore */
   }
-  manager = account = address = null;
+  try {
+    provider?.destroy?.();
+  } catch {
+    /* ignore */
+  }
+  manager = account = address = provider = null;
 }

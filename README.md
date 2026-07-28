@@ -25,11 +25,12 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 - **`what's my address?`** → the agent's smart-account address
 - **`what's my balance?`** → live MON balance, read from Monad
 - **`send 0.1 MON to 0x…`** → asks you to confirm, then broadcasts a **gasless** transfer (the wallet pays 0 gas) and returns the on-chain tx hash + explorer link
+- **`send 5 USDC to 0x…`** → same confirm-then-send flow for ERC-20 tokens — by symbol (USDC, WETH, WMON on testnet) or any 0x token address; decimals are read from the token contract
 - anything else → the local model just replies in words
 
 It all runs **on-device**: the model never calls the cloud, and the wallet key never leaves the machine.
 
-**Scope (v0):** native MON only — `get_address`, `get_balance`, `send`. No ERC-20s, swaps, bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
+**Scope (v0):** `get_address`, `get_balance`, `send` (native MON and ERC-20 transfers). No swaps, bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
 
 ---
 
@@ -88,9 +89,10 @@ Then talk to it:
 › what's my address?
 › what's my balance?
 › send 0.1 MON to 0xABCD…            # asks you to confirm, then broadcasts (or dry-runs)
+› send 5 USDC to 0xABCD…             # ERC-20 transfer — symbol or token address
 ```
 
-Or use the reliable slash-commands (no model needed): `/address` `/balance` `/send <to> <mon>` `/config` `/help` `/exit`.
+Or use the reliable slash-commands (no model needed): `/address` `/balance` `/send <to> <mon>` `/send <to> <amt> <token>` `/config` `/help` `/exit`.
 
 ---
 

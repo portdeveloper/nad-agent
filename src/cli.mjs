@@ -5,9 +5,10 @@
  *        writes  ->  WDK executes on Monad (gasless via Pimlico, or dry-run).
  *
  * Reliable slash-commands bypass the model entirely:
- *   /address           show the agent's wallet address
- *   /balance           show MON balance
- *   /send <to> <mon>   send MON (asks for confirmation)
+ *   /address                  show the agent's wallet address
+ *   /balance                  show MON balance
+ *   /send <to> <mon>          send MON (asks for confirmation)
+ *   /send <to> <amt> <token>  send an ERC-20 (symbol or 0x address)
  *   /config /help /exit
  */
 
@@ -135,6 +136,8 @@ async function handleSlash(line) {
     case "balance":
       return handleAction({ action: "get_balance" });
     case "send":
+      // /send <to> <amount> [token] — no token arg means native MON.
+      if (rest[2]) return handleAction({ action: "send_token", token: rest[2], to: rest[0], amount: rest[1] });
       return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
     case "config":
       statusBlock();
@@ -146,6 +149,7 @@ async function handleSlash(line) {
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance") + c.dim("           MON balance") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
+          "  " + c.cyan("/send <to> <amt> <token>") + c.dim("   send an ERC-20 (symbol or 0x address)") + "\n" +
           "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
           "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
       );

@@ -27,6 +27,11 @@ log("get_balance -> " + (await runAction({ action: "get_balance" })));
 log("\nsend_mon (dry-run):");
 log(indent(await runAction({ action: "send_mon", to: TEST_ADDR, amountMon: "0.01" })));
 
+// 2b) Dry-run ERC-20 transfer: symbol -> address via the built-in list, decimals
+// read from the token contract on Monad, then a simulated transfer userOp.
+log("\nsend_token (dry-run):");
+log(indent(await runAction({ action: "send_token", token: "USDC", to: TEST_ADDR, amount: "1.5" })));
+
 // 3) Local model: natural language -> action -> execute
 log("\nloading local model…");
 const t0 = process.hrtime.bigint();
