@@ -17,6 +17,9 @@ The [open issues](https://github.com/portdeveloper/nad-agent/issues) are the on-
 labelled `good first issue` is scoped small and safe to land as a first PR (token balance reads, name
 resolution, a `/history` command, a mainnet toggle, richer send confirmation). Comment on an issue to
 claim it before you start so two people don't build the same thing.
+If you contribute
+with an AI agent, the agent must read and follow <https://most.devnads.com/agents.md>: one claimed
+issue at a time, wait for a maintainer's go-ahead before writing code, one PR per day.
 
 ## Setup
 

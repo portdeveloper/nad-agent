@@ -1,5 +1,7 @@
 # CLAUDE.md — nad-agent
 
+> MOST contributors: read https://most.devnads.com/agents.md before opening an issue or a PR here.
+
 Context for Claude Code working in this repo. **nad-agent** is a 100% local AI agent with a
 gasless, self-custodial WDK smart wallet on Monad: QVAC (a local LLM) turns natural language into
 wallet actions; WDK executes them on Monad (gasless via a Pimlico paymaster, or dry-run).
