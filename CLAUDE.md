@@ -57,5 +57,6 @@ npm start                   # interactive REPL
 
 ## Scope & roadmap
 v0 actions: `get_address`, `get_balance`, `send` (native MON only). No tokens/swaps/bridges/NFTs
-yet; single account. **Upgrade path:** swap `src/tools.mjs` for QVAC native tool-calling
+yet. Accounts: any number derive from the seed (BIP-44 index; `/account` to list/switch,
+`NAD_ACCOUNT` to persist). **Upgrade path:** swap `src/tools.mjs` for QVAC native tool-calling
 (`completion({ tools })`) or the `@tetherto/wdk-mcp-toolkit` MCP server (35 tools). See README.

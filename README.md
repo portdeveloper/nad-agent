@@ -29,7 +29,7 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 
 It all runs **on-device**: the model never calls the cloud, and the wallet key never leaves the machine.
 
-**Scope (v0):** native MON only — `get_address`, `get_balance`, `send`. No ERC-20s, swaps, bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
+**Scope (v0):** native MON only — `get_address`, `get_balance`, `send`. No ERC-20s, swaps, bridges, NFTs, or arbitrary contract calls yet; testnet-first. Multiple accounts derive from the one seed (`/account` lists and switches them). It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
 
 ---
 
@@ -90,7 +90,7 @@ Then talk to it:
 › send 0.1 MON to 0xABCD…            # asks you to confirm, then broadcasts (or dry-runs)
 ```
 
-Or use the reliable slash-commands (no model needed): `/address` `/balance` `/send <to> <mon>` `/config` `/help` `/exit`.
+Or use the reliable slash-commands (no model needed): `/address` `/balance` `/send <to> <mon>` `/account [index]` `/config` `/help` `/exit`.
 
 ---
 

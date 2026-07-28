@@ -42,10 +42,22 @@ if (gasOverride === "dry-run" || !pimlicoKey) gasMode = "dry-run";
 else if (gasOverride === "native") gasMode = "native";
 else gasMode = "sponsored";
 
+// Which account (BIP-44 index) to activate at startup. All accounts come from the
+// same seed; index 0 is the v0 wallet, so behavior is unchanged when unset. Kept
+// env-driven like everything else here: set NAD_ACCOUNT in .env to persist a
+// choice, or switch live with /account in the REPL.
+const rawAccount = process.env.NAD_ACCOUNT || "0";
+const accountIndex = Number(rawAccount);
+if (!Number.isInteger(accountIndex) || accountIndex < 0) {
+  console.error(`nad-agent: invalid NAD_ACCOUNT "${rawAccount}" — must be a non-negative integer`);
+  process.exit(1);
+}
+
 export const config = {
   chain,
   gasMode,
   sponsorshipPolicyId,
+  accountIndex,
   // ERC-4337 needs a bundler+paymaster. For a LOCAL CLI the Pimlico key stays on
   // this machine, so we can hit Pimlico directly — no server proxy needed (unlike
   // the browser wallet, where the key had to be proxied).
@@ -69,6 +81,7 @@ export function describeConfig() {
     `network:  ${config.chain.name} (chainId ${config.chain.chainId})`,
     `rpc:      ${config.chain.rpcUrl}`,
     `gas mode: ${config.gasMode}${config.gasMode === "dry-run" ? "  (sends are simulated — set PIMLICO_API_KEY to broadcast)" : ""}`,
+    `account:  #${config.accountIndex} (BIP-44 index — switch with /account)`,
     `model:    ${config.model.localPath || config.model.name}`,
   ].join("\n");
 }

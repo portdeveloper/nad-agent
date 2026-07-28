@@ -5,6 +5,12 @@
  * v0.7) from the 24-word seed. The seed/key live only on THIS machine. Reads go
  * straight to Monad's RPC; sends go through the Pimlico bundler/paymaster.
  *
+ * One seed, many accounts: `manager.getAccount(N)` derives the owner key at
+ * BIP-44 path m/44'/60'/0'/0/N, so each index yields its own Safe account.
+ * The active index defaults to NAD_ACCOUNT (0 when unset) and can be switched
+ * live via /account in the REPL. Address derivation is counterfactual (pure
+ * computation, no RPC), so listing accounts works offline.
+ *
  * The WDK EVM module is dynamically imported so the SDK only evaluates when a
  * wallet is actually needed (and so the doctor/help paths work without it).
  */
@@ -14,6 +20,7 @@ import { config } from "./config.mjs";
 let manager = null;
 let account = null;
 let address = null;
+let accountIndex = null;
 
 function buildWalletConfig() {
   const { chain, gasMode, bundlerUrl, sponsorshipPolicyId } = config;
@@ -40,19 +47,52 @@ function buildWalletConfig() {
   return { ...base, useNativeCoins: true };
 }
 
-export async function initWallet() {
+export async function initWallet(index = config.accountIndex) {
   if (!config.seed) {
     throw new Error("WDK_SEED is not set. Generate one with `npm run gen-seed`, then put it in .env");
   }
   const { default: WalletManagerEvmErc4337 } = await import("@tetherto/wdk-wallet-evm-erc-4337");
   manager = new WalletManagerEvmErc4337(config.seed, buildWalletConfig());
-  account = await manager.getAccount(0);
+  return switchAccount(index);
+}
+
+/**
+ * Make account `index` the active one. WDK's `manager.getAccount(index)` derives the
+ * owner key at BIP-44 path m/44'/60'/0'/0/<index> and counterfactually computes the
+ * Safe address from it, so every index maps to a distinct Safe smart account of the
+ * same seed. The manager caches accounts per path; dispose() wipes them all.
+ */
+export async function switchAccount(index) {
+  if (!manager) throw new Error("Wallet not initialized");
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error(`Account index must be a non-negative integer (got "${index}")`);
+  }
+  account = await manager.getAccount(index);
   address = await account.getAddress();
+  accountIndex = index;
   return address;
+}
+
+/**
+ * Derive addresses for accounts 0..count-1 WITHOUT changing the active account.
+ * Read-only: uses the same cached-per-path manager, so repeat calls are cheap.
+ */
+export async function listAccounts(count = 5) {
+  if (!manager) throw new Error("Wallet not initialized");
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const acct = await manager.getAccount(i);
+    out.push({ index: i, address: await acct.getAddress(), active: i === accountIndex });
+  }
+  return out;
 }
 
 export function getAddress() {
   return address;
+}
+
+export function getAccountIndex() {
+  return accountIndex;
 }
 
 export async function getBalance() {
@@ -109,9 +149,11 @@ async function waitForUserOpTxHash(userOpHash, { tries = 40, delayMs = 1500 } = 
 
 export function dispose() {
   try {
-    account?.dispose?.();
+    // manager.dispose() wipes EVERY cached account (one per derivation path), not
+    // just the active one — accounts touched by /account list hold keys too.
+    manager?.dispose?.();
   } catch {
     /* ignore */
   }
-  manager = account = address = null;
+  manager = account = address = accountIndex = null;
 }

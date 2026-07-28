@@ -19,9 +19,27 @@ log();
 
 // 1) Wallet: init + reads (real, against Monad RPC)
 const addr = await wallet.initWallet();
-log("wallet initialized: " + addr);
+log("wallet initialized: " + addr + ` (account #${wallet.getAccountIndex()})`);
 log("get_address -> " + (await runAction({ action: "get_address" })));
 log("get_balance -> " + (await runAction({ action: "get_balance" })));
+
+// 1b) Multi-account: derive siblings from the same seed, switch, switch back.
+// Address derivation is counterfactual (no RPC), so this must always work.
+log("\naccounts (same seed, BIP-44 m/44'/60'/0'/0/N):");
+const accounts = await wallet.listAccounts(3);
+for (const a of accounts) log(`  #${a.index} ${a.address}${a.active ? "  <- active" : ""}`);
+if (new Set(accounts.map((a) => a.address)).size !== accounts.length) {
+  throw new Error("account addresses are not distinct");
+}
+const sibling = config.accountIndex + 1;
+const addrSibling = await wallet.switchAccount(sibling);
+if (addrSibling === addr) throw new Error("switching accounts did not change the address");
+if (wallet.getAddress() !== addrSibling) throw new Error("getAddress() does not track the active account");
+log(`switch -> #${sibling} ${addrSibling}`);
+log(`get_balance (account #${sibling}) -> ` + (await runAction({ action: "get_balance" })));
+const addrBack = await wallet.switchAccount(config.accountIndex);
+if (addrBack !== addr) throw new Error("switching back did not restore the original address");
+log(`switch back -> #${wallet.getAccountIndex()} ${addrBack}`);
 
 // 2) Dry-run send via the tools layer (no Pimlico key -> simulated)
 log("\nsend_mon (dry-run):");

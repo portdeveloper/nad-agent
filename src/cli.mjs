@@ -8,6 +8,7 @@
  *   /address           show the agent's wallet address
  *   /balance           show MON balance
  *   /send <to> <mon>   send MON (asks for confirmation)
+ *   /account           list accounts derived from the seed / switch the active one
  *   /config /help /exit
  */
 
@@ -80,6 +81,7 @@ function statusBlock() {
   row("engine", c.qvac("Tether QVAC") + c.dim(" · on-device inference" + (METAL ? " · Metal GPU" : "")));
   row("model", c.cyan(model));
   row("wallet", c.violet("Tether WDK") + c.dim(" · self-custodial Safe ERC-4337"));
+  row("account", c.cyan(`#${wallet.getAccountIndex() ?? config.accountIndex}`) + c.dim(" · derived from the seed · /account to switch"));
   row("network", c.violet(config.chain.name) + c.dim(` · chainId ${config.chain.chainId}`));
   row("rpc", c.gray(config.chain.rpcUrl));
   row("gas", `${dot} ${gas}`);
@@ -127,6 +129,58 @@ async function handleAction(action) {
   return true;
 }
 
+/**
+ * /account            list derived accounts (active one marked)
+ * /account list [n]   list the first n accounts (default 5)
+ * /account <index>    switch the active account to that BIP-44 index
+ */
+async function handleAccount(rest) {
+  const sub = rest[0];
+  if (sub === undefined || sub === "list") {
+    const count = sub === "list" && rest[1] ? Number(rest[1]) : 5;
+    if (!Number.isInteger(count) || count < 1 || count > 100) {
+      console.log(c.red("  usage: /account list [1-100]") + "\n");
+      return true;
+    }
+    // Show at least up to the active index so the marker is always visible.
+    const n = Math.max(count, (wallet.getAccountIndex() ?? 0) + 1);
+    const accounts = await wallet.listAccounts(n);
+    console.log("\n  " + c.violet(c.bold("accounts")) + c.dim(" · all derived from this seed (BIP-44 m/44'/60'/0'/0/N)"));
+    for (const a of accounts) {
+      const marker = a.active ? c.green("● ") : c.dim("○ ");
+      const label = a.active ? c.bold(`#${a.index}`) : c.dim(`#${a.index}`);
+      console.log("  " + marker + label + "  " + (a.active ? c.addr(a.address) : c.gray(a.address)));
+    }
+    console.log("  " + c.dim("switch: ") + c.cyan("/account <index>") + c.dim(" · persist: set ") + c.cyan("NAD_ACCOUNT=<index>") + c.dim(" in .env") + "\n");
+    return true;
+  }
+  const index = Number(sub);
+  if (!Number.isInteger(index) || index < 0) {
+    console.log(c.red(`  usage: /account · /account list [n] · /account <index>`) + "\n");
+    return true;
+  }
+  if (index === wallet.getAccountIndex()) {
+    console.log(c.dim(`  already on account #${index}`) + " " + c.addr(wallet.getAddress()) + "\n");
+    return true;
+  }
+  try {
+    const addr = await wallet.switchAccount(index);
+    console.log("\n  " + c.green(`switched to account #${index}`));
+    console.log("  " + c.dim("address ") + c.addr(addr));
+    try {
+      const bal = await wallet.getBalance();
+      const { formatMon } = await import("./format.mjs");
+      console.log("  " + c.dim("balance ") + c.green(`${formatMon(bal)} ${config.chain.symbol}`));
+    } catch {
+      /* balance read is best-effort */
+    }
+    console.log("  " + c.dim("session-only — add ") + c.cyan(`NAD_ACCOUNT=${index}`) + c.dim(" to .env to make it the default") + "\n");
+  } catch (err) {
+    console.log(c.red(`  error: ${err.message}`) + "\n");
+  }
+  return true;
+}
+
 async function handleSlash(line) {
   const [cmd, ...rest] = line.slice(1).trim().split(/\s+/);
   switch (cmd) {
@@ -136,6 +190,8 @@ async function handleSlash(line) {
       return handleAction({ action: "get_balance" });
     case "send":
       return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
+    case "account":
+      return handleAccount(rest);
     case "config":
       statusBlock();
       console.log("");
@@ -146,6 +202,7 @@ async function handleSlash(line) {
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance") + c.dim("           MON balance") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
+          "  " + c.cyan("/account [index]") + c.dim("   list accounts from this seed, or switch by index") + "\n" +
           "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
           "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
       );
@@ -167,6 +224,9 @@ async function main() {
   try {
     const addr = await wallet.initWallet();
     console.log(c.green("ok"));
+    if (config.accountIndex !== 0) {
+      console.log("   " + c.dim("account ") + c.cyan(`#${config.accountIndex}`) + c.dim(" (NAD_ACCOUNT)"));
+    }
     console.log("   " + c.dim("address ") + c.addr(addr));
     try {
       const bal = await wallet.getBalance();
