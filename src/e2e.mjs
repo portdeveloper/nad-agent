@@ -7,7 +7,7 @@
 import { config, describeConfig } from "./config.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
-import { systemPrompt, parseAction, runAction } from "./tools.mjs";
+import { systemPrompt, parseAction, runAction, buildSwapPreview } from "./tools.mjs";
 
 const TEST_ADDR = "0x000000000000000000000000000000000000dEaD";
 const log = (s = "") => console.log(s);
@@ -27,13 +27,27 @@ log("get_balance -> " + (await runAction({ action: "get_balance" })));
 log("\nsend_mon (dry-run):");
 log(indent(await runAction({ action: "send_mon", to: TEST_ADDR, amountMon: "0.01" })));
 
-// 3) Local model: natural language -> action -> execute
+// 3) Swap: real router quote (eth_call) then a dry-run swap. The quote is live
+//    even with no key and no funds, so this checks the DEX wiring for real.
+if (config.chain.dex) {
+  log(`\nswap quote + dry-run (${config.chain.dex.name}):`);
+  const swap = { action: "swap", amountIn: "5", tokenIn: "USDC", tokenOut: "WMON" };
+  const preview = await buildSwapPreview(swap);
+  if (preview.error) {
+    log(indent(`quote unavailable: ${preview.error}`));
+  } else {
+    log(indent(preview.block));
+    log(indent(await runAction(swap, { preview })));
+  }
+}
+
+// 4) Local model: natural language -> action -> execute
 log("\nloading local model…");
 const t0 = process.hrtime.bigint();
 await brain.loadBrain();
 log(`model ready (${(Number(process.hrtime.bigint() - t0) / 1e9).toFixed(1)}s)`);
 
-for (const q of ["what is my MON balance?", `send 0.05 MON to ${TEST_ADDR}`]) {
+for (const q of ["what is my MON balance?", `send 0.05 MON to ${TEST_ADDR}`, "swap 5 USDC for WMON"]) {
   log(`\nNL › "${q}"`);
   const history = [
     { role: "system", content: systemPrompt() },

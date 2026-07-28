@@ -8,6 +8,7 @@
  *   /address           show the agent's wallet address
  *   /balance           show MON balance
  *   /send <to> <mon>   send MON (asks for confirmation)
+ *   /swap <amt> <in> <out>  swap tokens via the DEX (quotes, then confirms)
  *   /config /help /exit
  */
 
@@ -27,6 +28,7 @@ import {
   parseAction,
   runAction,
   describeAction,
+  buildSwapPreview,
   isWrite,
 } from "./tools.mjs";
 
@@ -111,15 +113,28 @@ async function confirm(question) {
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
 async function handleAction(action) {
   if (action.action === "none") return false;
+  let swapPreview = null;
   if (isWrite(action.action)) {
-    console.log("\n  " + c.yellow(describeAction(action)));
+    if (action.action === "swap") {
+      // Quote first (real eth_call) so the confirmation shows route, quoted
+      // output, min-out and slippage. The same preview is passed to runAction
+      // so exactly what was confirmed is what executes.
+      swapPreview = await buildSwapPreview(action);
+      if (swapPreview.error) {
+        console.log(c.red(`  refused: ${swapPreview.error}`) + "\n");
+        return true;
+      }
+      console.log("\n" + swapPreview.block.split("\n").map((l) => "  " + c.yellow(l)).join("\n"));
+    } else {
+      console.log("\n  " + c.yellow(describeAction(action)));
+    }
     if (!(await confirm("  confirm?"))) {
       console.log(c.dim("  cancelled.") + "\n");
       return true;
     }
   }
   try {
-    const out = await runAction(action);
+    const out = await runAction(action, swapPreview ? { preview: swapPreview } : {});
     if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
   } catch (err) {
     console.log(c.red(`  error: ${err.message}`) + "\n");
@@ -136,6 +151,9 @@ async function handleSlash(line) {
       return handleAction({ action: "get_balance" });
     case "send":
       return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
+    case "swap":
+      // /swap <amount> <tokenIn> <tokenOut>, e.g. /swap 5 USDC WMON
+      return handleAction({ action: "swap", amountIn: rest[0], tokenIn: rest[1], tokenOut: rest[2] });
     case "config":
       statusBlock();
       console.log("");
@@ -146,6 +164,7 @@ async function handleSlash(line) {
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance") + c.dim("           MON balance") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
+          "  " + c.cyan("/swap <amt> <in> <out>") + c.dim("  swap tokens on the DEX, e.g. /swap 5 USDC WMON") + "\n" +
           "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
           "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
       );

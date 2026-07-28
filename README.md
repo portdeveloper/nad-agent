@@ -25,11 +25,12 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 - **`what's my address?`** → the agent's smart-account address
 - **`what's my balance?`** → live MON balance, read from Monad
 - **`send 0.1 MON to 0x…`** → asks you to confirm, then broadcasts a **gasless** transfer (the wallet pays 0 gas) and returns the on-chain tx hash + explorer link
+- **`swap 5 USDC for WMON`** → quotes the trade on [PuddleSwap](https://github.com/portdeveloper/puddleswap) (a Uniswap-V2-style DEX on Monad testnet), shows route, quoted output, min-out and slippage, then swaps after you confirm. Approve + swap batch into one UserOperation.
 - anything else → the local model just replies in words
 
 It all runs **on-device**: the model never calls the cloud, and the wallet key never leaves the machine.
 
-**Scope (v0):** native MON only — `get_address`, `get_balance`, `send`. No ERC-20s, swaps, bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
+**Scope (v0):** `get_address`, `get_balance`, `send` (native MON) and `swap` (PuddleSwap, testnet). No bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
 
 ---
 
@@ -88,9 +89,10 @@ Then talk to it:
 › what's my address?
 › what's my balance?
 › send 0.1 MON to 0xABCD…            # asks you to confirm, then broadcasts (or dry-runs)
+› swap 5 USDC for WMON               # quotes on PuddleSwap, shows min-out, then swaps on confirm
 ```
 
-Or use the reliable slash-commands (no model needed): `/address` `/balance` `/send <to> <mon>` `/config` `/help` `/exit`.
+Or use the reliable slash-commands (no model needed): `/address` `/balance` `/send <to> <mon>` `/swap <amt> <in> <out>` `/config` `/help` `/exit`.
 
 ---
 
@@ -100,6 +102,17 @@ Or use the reliable slash-commands (no model needed): `/address` `/balance` `/se
 - **`PIMLICO_API_KEY` set** → sends broadcast for real via ERC-4337. Add a **`PIMLICO_SPONSORSHIP_POLICY_ID`** to make them **gasless** (the paymaster funds gas). Get both at <https://dashboard.pimlico.io>.
 
 Flipping between these is a one-line `.env` change — no code change.
+
+## Swaps (PuddleSwap)
+
+The `swap` action trades on [PuddleSwap](https://github.com/portdeveloper/puddleswap), a Uniswap-V2-style DEX deployed on Monad testnet. It's RPC-only: quotes are `getAmountsOut` eth_calls straight to the router, swaps are `swapExact{Tokens,ETH}For…` calls — no API server, no extra key.
+
+- **Quote first, always.** Before the confirm prompt the agent asks the router for the output on the direct pair and one-hop routes through the known tokens (WMON, USDC, USDT) and picks the best. Quotes are live even in dry-run with no funds.
+- **Min-out protects you.** The quoted output minus the slippage tolerance (default 0.5%, `SWAP_SLIPPAGE_PERCENT` in `.env`) goes on-chain as `amountOutMin`; the swap reverts rather than fill below it. Deadline is 10 minutes.
+- **Approve is batched.** When the input is an ERC-20 and the router's allowance is short, an exact-amount `approve` is batched with the swap into ONE UserOperation (WDK's ERC-4337 account takes an array of calls), so both land atomically in a single transaction.
+- **Native MON works.** `swap 0.1 MON to USDC` uses `swapExactETHForTokens` (the router wraps to WMON); swapping to MON uses `swapExactTokensForETH`. No approval needed when paying with MON.
+
+Testnet-only for now: no vetted DEX deployment is pinned for mainnet, and the action refuses there rather than guessing addresses.
 
 ## Build step
 
