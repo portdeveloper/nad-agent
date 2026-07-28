@@ -42,8 +42,7 @@ npm start                   # interactive REPL
   (`getUserOperationReceipt`) — keep that when touching the send path.
 - **macOS only:** QVAC's darwin-arm64 prebuild links Homebrew's OpenSSL 3
   (`brew install openssl@3`), or the worker aborts on `dlopen … libssl.3.dylib`. Not needed on Linux.
-- **QVAC's worker inherits `stdin`** → readline is created *after* the model loads; piped stdin is
-  unreliable, so use `npm run smoke` for automation.
+- **QVAC's worker inherits `stdin`** → `cli.mjs` drains stdin into a buffer at import time (before the wallet or model loads) so the worker inherits an already-consumed fd 0. Piped input now works reliably; non-TTY mode reads line-by-line to EOF and exits cleanly.
 - Generation is capped by `QVAC_MAX_TOKENS` (default 256) with `temp=0`. Qwen3 emits `<think>…`
   before answering — raise the cap for complex multi-step prompts.
 

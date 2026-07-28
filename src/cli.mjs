@@ -14,10 +14,44 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
-// Created in main() AFTER the model loads. QVAC spawns a Bare worker that inherits
-// fd 0/1, and a readline built before that would swallow buffered input during the
-// (multi-second) model load, so we defer it until the prompt is actually ready.
+// Interactive (TTY) readline. Created in main() AFTER the model loads: QVAC spawns
+// a Bare worker that inherits fd 0/1, and a readline built before that would swallow
+// buffered input during the (multi-second) model load, so we defer it until the
+// prompt is actually ready.
 let rl;
+
+// ── piped / scripted stdin (non-TTY) ────────────────────────────────────────
+// When stdin is a pipe, deferring readline works against us: QVAC's worker inherits
+// fd 0 (stdio: ["inherit", "inherit", "pipe"] in the SDK), so any input still
+// sitting in the pipe when the worker spawns is up for grabs and lines got lost or
+// split. So in non-TTY mode we take ownership of stdin HERE, at import time, before
+// the wallet or the model runs: drain every line into a queue, feed the REPL from
+// the queue and exit cleanly at EOF instead of waiting forever on a closed pipe.
+const INTERACTIVE = !!stdin.isTTY;
+const pipedLines = [];
+let pipedEof = INTERACTIVE; // the queue is only used in non-TTY mode
+let wakePiped = null;
+if (!INTERACTIVE) {
+  const reader = createInterface({ input: stdin, crlfDelay: Infinity });
+  reader.on("line", (line) => {
+    pipedLines.push(line);
+    wakePiped?.();
+  });
+  reader.on("close", () => {
+    pipedEof = true;
+    wakePiped?.();
+  });
+}
+
+/** Next queued line from the pipe, or null at EOF. Waits on a slow producer. */
+async function nextPipedLine() {
+  for (;;) {
+    if (pipedLines.length > 0) return pipedLines.shift();
+    if (pipedEof) return null;
+    await new Promise((resolve) => (wakePiped = resolve));
+    wakePiped = null;
+  }
+}
 import { config } from "./config.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
@@ -104,7 +138,17 @@ function banner() {
 }
 
 async function confirm(question) {
-  const ans = (await rl.question(c.yellow(question + " ") + c.dim("[y/N] "))).trim().toLowerCase();
+  let ans;
+  if (INTERACTIVE) {
+    ans = await rl.question(c.yellow(question + " ") + c.dim("[y/N] "));
+  } else {
+    // Scripted confirmation: the next piped line answers (e.g. printf '/send …\ny\n').
+    // EOF means no answer, and no answer means no — never write on a silent pipe.
+    process.stdout.write(c.yellow(question + " ") + c.dim("[y/N] "));
+    ans = (await nextPipedLine()) ?? "";
+    console.log(ans);
+  }
+  ans = ans.trim().toLowerCase();
   return ans === "y" || ans === "yes";
 }
 
@@ -198,23 +242,32 @@ async function main() {
     "\n   " + c.dim("type ") + c.cyan("/help") + c.dim(" for commands, or just talk to it. ") + c.dim("Ctrl-C to quit.") + "\n"
   );
 
-  // Create readline now — after the model load — so it doesn't discard buffered input.
-  rl = createInterface({ input: stdin, output: stdout });
+  // Interactive: create readline now, after the model load, so it doesn't discard
+  // buffered input. Piped: the queue at the top of this file already owns stdin.
+  let closed = false;
+  if (INTERACTIVE) {
+    rl = createInterface({ input: stdin, output: stdout });
+    rl.on("close", () => {
+      closed = true;
+    });
+  }
 
   const history = [{ role: "system", content: systemPrompt() }];
-
-  let closed = false;
-  rl.on("close", () => {
-    closed = true;
-  });
 
   for (;;) {
     if (closed) break;
     let line;
-    try {
-      line = (await rl.question(c.prompt("❯ "))).trim();
-    } catch {
-      break; // readline closed (Ctrl-D / EOF / piped input ended)
+    if (INTERACTIVE) {
+      try {
+        line = (await rl.question(c.prompt("❯ "))).trim();
+      } catch {
+        break; // readline closed (Ctrl-D / EOF)
+      }
+    } else {
+      const piped = await nextPipedLine();
+      if (piped == null) break; // pipe hit EOF — all input processed, exit cleanly
+      line = piped.trim();
+      console.log(c.prompt("❯ ") + line); // echo so the transcript reads like a session
     }
     if (!line) continue;
 
@@ -246,7 +299,7 @@ async function main() {
 
   await brain.unloadBrain().catch(() => {});
   wallet.dispose();
-  rl.close();
+  rl?.close();
 }
 
 main().catch((err) => {

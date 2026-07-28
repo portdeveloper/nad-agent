@@ -131,9 +131,7 @@ dry-run loop. Real gasless sending is wired up and Pimlico's bundler/paymaster i
 Monad testnet; sends report the **real on-chain tx hash** — resolved from the ERC-4337 UserOperation
 receipt, not the userOpHash. A `FIELD-REPORT-m4max.md` in the repo logs the full macOS bring-up.
 
-**Known limitation:** QVAC's worker inherits `stdin`, so the interactive REPL only
-handles reliably-typed TTY input — piped/scripted stdin is flaky. For automation use
-`npm run smoke` (no readline). Verify interactive use on your Mac.
+Piped and scripted input works: `echo "/address" | npm start` runs the command and exits cleanly. For CI automation `npm run smoke` remains the fastest path (no model load needed).
 
 ## Contributing
 
