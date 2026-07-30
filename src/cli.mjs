@@ -80,7 +80,11 @@ function statusBlock() {
   row("engine", c.qvac("Tether QVAC") + c.dim(" · on-device inference" + (METAL ? " · Metal GPU" : "")));
   row("model", c.cyan(model));
   row("wallet", c.violet("Tether WDK") + c.dim(" · self-custodial Safe ERC-4337"));
-  row("network", c.violet(config.chain.name) + c.dim(` · chainId ${config.chain.chainId}`));
+  row(
+    "network",
+    (config.isMainnet ? c.red(c.bold(config.chain.name)) : c.violet(config.chain.name)) +
+      c.dim(` · chainId ${config.chain.chainId}`),
+  );
   row("rpc", c.gray(config.chain.rpcUrl));
   row("gas", `${dot} ${gas}`);
 }
@@ -100,7 +104,28 @@ function banner() {
   console.log("  " + c.wdk("◆ Tether WDK") + c.dim("  — self-custodial smart wallet · your keys never leave this device"));
   console.log("");
   statusBlock();
+  if (config.isMainnet) {
+    const tail =
+      config.gasMode === "dry-run"
+        ? c.dim("gas mode is dry-run, sends are simulated.")
+        : c.red("sends move real MON.");
+    console.log("");
+    console.log("  " + c.red(c.bold("⚠ MAINNET")) + c.dim(" — real funds. ") + tail);
+  }
   console.log("");
+}
+
+// One explicit acknowledgement per session before the FIRST real-fund write on
+// mainnet (dry-run stays friction-free — those sends are simulated anyway).
+let mainnetAcked = false;
+
+async function confirmMainnetOnce() {
+  if (!config.isMainnet || config.gasMode === "dry-run" || mainnetAcked) return true;
+  console.log("  " + c.red(c.bold("MAINNET")) + c.yellow(" — this will move real MON."));
+  const ans = (await rl.question(c.yellow("  type ") + c.bold("mainnet") + c.yellow(" to acknowledge for this session: "))).trim().toLowerCase();
+  if (ans !== "mainnet") return false;
+  mainnetAcked = true;
+  return true;
 }
 
 async function confirm(question) {
@@ -113,6 +138,10 @@ async function handleAction(action) {
   if (action.action === "none") return false;
   if (isWrite(action.action)) {
     console.log("\n  " + c.yellow(describeAction(action)));
+    if (!(await confirmMainnetOnce())) {
+      console.log(c.dim("  cancelled.") + "\n");
+      return true;
+    }
     if (!(await confirm("  confirm?"))) {
       console.log(c.dim("  cancelled.") + "\n");
       return true;
