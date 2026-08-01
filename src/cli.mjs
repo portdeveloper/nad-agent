@@ -128,6 +128,10 @@ async function confirmMainnetOnce() {
   return true;
 }
 
+// The prompt itself carries the network: a persistent mainnet marker survives
+// scrollback where the startup banner does not.
+const REPL_PROMPT = config.isMainnet ? c.red(c.bold("mainnet ")) + c.prompt("❯ ") : c.prompt("❯ ");
+
 async function confirm(question) {
   const ans = (await rl.question(c.yellow(question + " ") + c.dim("[y/N] "))).trim().toLowerCase();
   return ans === "y" || ans === "yes";
@@ -241,7 +245,7 @@ async function main() {
     if (closed) break;
     let line;
     try {
-      line = (await rl.question(c.prompt("❯ "))).trim();
+      line = (await rl.question(REPL_PROMPT)).trim();
     } catch {
       break; // readline closed (Ctrl-D / EOF / piped input ended)
     }
