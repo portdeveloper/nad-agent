@@ -218,6 +218,12 @@ test("parseAction detects token balance phrases", () => {
   });
 });
 
+test("parseAction does not partially match addresses inside longer strings", () => {
+  assert.deepEqual(parseAction("balance of abc0x000000000000000000000000000000000000dEaDffff"), {
+    action: "none",
+  });
+});
+
 test("parseAction never guesses a send from free text", () => {
   assert.deepEqual(parseAction("send 1 MON to 0x000000000000000000000000000000000000dEaD"), {
     action: "none",

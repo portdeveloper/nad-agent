@@ -25,7 +25,7 @@ export const ACTIONS = {
 
 const SYMBOL = () => config.chain.symbol;
 const isNativeToken = (token) => String(token ?? "").trim().toUpperCase() === SYMBOL();
-const ADDRESS_RE = /0x[0-9a-fA-F]{40}/;
+const ADDRESS_RE = /\b0x[0-9a-fA-F]{40}\b/;
 const looksLikeBalanceQuestion = (text) => /\b(balance|bal|holding|holdings)\b/i.test(text);
 
 function parseTokenBalancePhrase(text) {
