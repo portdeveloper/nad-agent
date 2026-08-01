@@ -2,8 +2,9 @@ import { getAddress } from "ethers";
 import { config } from "./config.mjs";
 import { isAddress } from "./format.mjs";
 
-// Small built-in list from the official Monad token-list repo. Raw token
-// addresses still work for anything not listed here.
+// Built-in testnet token entries are from the Monad token-list testnet JSON:
+// https://github.com/monad-crypto/token-list/blob/main/tokenlist-testnet.json
+// Raw token addresses still work for anything not listed here.
 export const KNOWN_TOKENS = {
   testnet: {
     USDC: {
