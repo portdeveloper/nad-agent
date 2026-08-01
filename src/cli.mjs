@@ -18,6 +18,42 @@ import { stdin, stdout } from "node:process";
 // fd 0/1, and a readline built before that would swallow buffered input during the
 // (multi-second) model load, so we defer it until the prompt is actually ready.
 let rl;
+
+// ── scripted (non-TTY) mode ─────────────────────────────────────────────────
+// QVAC's worker inherits fd 0, so piped input used to race the REPL (BUILD_LOG
+// §4). In scripted mode we drain stdin to EOF *before* the worker ever spawns,
+// then feed the buffered lines through the same dispatch as the interactive
+// REPL. Prompts, banner and progress go to stderr so stdout stays machine-clean;
+// confirmations consume the next scripted line, preserving REPL semantics
+// (`printf '/send 0xdead 0.1\ny\n' | nad-agent`).
+const SCRIPTED = !stdin.isTTY;
+let scriptLines = [];
+let hadFailure = false;
+
+async function readScriptLines() {
+  const chunks = [];
+  for await (const chunk of stdin) chunks.push(chunk);
+  return Buffer.concat(chunks)
+    .toString("utf8")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("#"));
+}
+
+// One question surface for both modes: interactive readline, or the next
+// scripted line (echoed to stderr so transcripts read like a session).
+async function ask(promptText) {
+  if (!SCRIPTED) return (await rl.question(promptText)).trim();
+  const answer = scriptLines.length ? scriptLines.shift() : "";
+  process.stderr.write(promptText + (answer || "<no answer line>") + "\n");
+  return answer;
+}
+
+// println: stdout in interactive mode, stderr in scripted mode (results only
+// belong on stdout there).
+const println = (...a) => (SCRIPTED ? console.error(...a) : console.log(...a));
+const printw = (s) => (SCRIPTED ? process.stderr.write(s) : process.stdout.write(s));
+
 import { config } from "./config.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
@@ -75,7 +111,7 @@ function statusBlock() {
         ? c.yellow("dry-run") + c.dim(" · sends are simulated")
         : c.cyan("native") + c.dim(" · you pay gas in MON");
   const model = config.model.localPath ? config.model.localPath.split("/").pop() : config.model.name;
-  const row = (label, value) => console.log("   " + c.dim(label.padEnd(8)) + value);
+  const row = (label, value) => println("   " + c.dim(label.padEnd(8)) + value);
   // Engine first — QVAC is the whole point.
   row("engine", c.qvac("Tether QVAC") + c.dim(" · on-device inference" + (METAL ? " · Metal GPU" : "")));
   row("model", c.cyan(model));
@@ -91,28 +127,28 @@ function statusBlock() {
 
 function banner() {
   const aside = ["", "", c.violet(c.bold("· agent")), "", c.gray("self-custodial wallet · settles on Monad"), ""];
-  console.log("");
+  println("");
   LOGO.forEach((line, i) => {
     const logo = COLOR ? `\x1b[${GRAD[i]}m${line}\x1b[0m` : line;
-    console.log("  " + logo + "   " + aside[i]);
+    println("  " + logo + "   " + aside[i]);
   });
-  console.log("");
+  println("");
   // The two stars — both Tether. QVAC does the thinking, WDK holds the keys.
   // QVAC tagline is its own positioning (qvac.tether.io): "Decentralized, Local AI".
   const metalBit = METAL ? " on your Metal GPU" : "";
-  console.log("  " + c.qvac("⚡ Tether QVAC") + c.dim(" — Decentralized, Local AI · thinks on-device" + metalBit + ", no cloud"));
-  console.log("  " + c.wdk("◆ Tether WDK") + c.dim("  — self-custodial smart wallet · your keys never leave this device"));
-  console.log("");
+  println("  " + c.qvac("⚡ Tether QVAC") + c.dim(" — Decentralized, Local AI · thinks on-device" + metalBit + ", no cloud"));
+  println("  " + c.wdk("◆ Tether WDK") + c.dim("  — self-custodial smart wallet · your keys never leave this device"));
+  println("");
   statusBlock();
   if (config.isMainnet) {
     const tail =
       config.gasMode === "dry-run"
         ? c.dim("gas mode is dry-run, sends are simulated.")
         : c.red("sends move real MON.");
-    console.log("");
-    console.log("  " + c.red(c.bold("⚠ MAINNET")) + c.dim(" — real funds. ") + tail);
+    println("");
+    println("  " + c.red(c.bold("⚠ MAINNET")) + c.dim(" — real funds. ") + tail);
   }
-  console.log("");
+  println("");
 }
 
 // One explicit acknowledgement per session before the FIRST real-fund write on
@@ -122,8 +158,9 @@ let mainnetAcked = false;
 async function confirmMainnetOnce() {
   if (!config.isMainnet || config.gasMode === "dry-run" || mainnetAcked) return true;
   console.log("  " + c.red(c.bold("MAINNET")) + c.yellow(" — this will move real MON."));
-  const ans = (await rl.question(c.yellow("  type ") + c.bold("mainnet") + c.yellow(" to acknowledge for this session: "))).trim().toLowerCase();
-  if (ans !== "mainnet") return false;
+  const raw = await ask(c.yellow("  type ") + c.bold("mainnet") + c.yellow(" to acknowledge for this session: "));
+  if (SCRIPTED && raw === "") hadFailure = true;
+  if (raw.toLowerCase() !== "mainnet") return false;
   mainnetAcked = true;
   return true;
 }
@@ -133,7 +170,13 @@ async function confirmMainnetOnce() {
 const REPL_PROMPT = config.isMainnet ? c.red(c.bold("mainnet ")) + c.prompt("❯ ") : c.prompt("❯ ");
 
 async function confirm(question) {
-  const ans = (await rl.question(c.yellow(question + " ") + c.dim("[y/N] "))).trim().toLowerCase();
+  const raw = await ask(c.yellow(question + " ") + c.dim("[y/N] "));
+  if (SCRIPTED && raw === "") {
+    println(c.red("  no answer line for the confirmation; cancelling this action."));
+    hadFailure = true;
+    return false;
+  }
+  const ans = raw.toLowerCase();
   return ans === "y" || ans === "yes";
 }
 
@@ -156,6 +199,7 @@ async function handleAction(action) {
     if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
   } catch (err) {
     console.log(c.red(`  error: ${err.message}`) + "\n");
+    if (SCRIPTED) hadFailure = true;
   }
   return true;
 }
@@ -193,93 +237,120 @@ async function handleSlash(line) {
 }
 
 async function main() {
+  // Scripted mode: drain stdin to EOF before anything else. The QVAC worker
+  // inherits fd 0 when it spawns; by then the input must already be ours.
+  if (SCRIPTED) scriptLines = await readScriptLines();
+
   banner();
 
   // 1) Wallet — reads work with just an RPC; writes need Pimlico (else dry-run).
-  process.stdout.write(c.dim("   ") + c.violet("WDK") + c.dim(" · initializing wallet… "));
+  printw(c.dim("   ") + c.violet("WDK") + c.dim(" · initializing wallet… "));
   try {
     const addr = await wallet.initWallet();
-    console.log(c.green("ok"));
-    console.log("   " + c.dim("address ") + c.addr(addr));
+    println(c.green("ok"));
+    println("   " + c.dim("address ") + c.addr(addr));
     try {
       const bal = await wallet.getBalance();
       const { formatMon } = await import("./format.mjs");
-      console.log("   " + c.dim("balance ") + c.green(`${formatMon(bal)} ${config.chain.symbol}`));
+      println("   " + c.dim("balance ") + c.green(`${formatMon(bal)} ${config.chain.symbol}`));
     } catch {
       /* balance read is best-effort at startup */
     }
   } catch (err) {
-    console.log(c.red("FAILED") + `\n   ${err.message}\n`);
+    println(c.red("FAILED") + `\n   ${err.message}\n`);
     rl?.close();
     process.exit(1);
   }
 
   // 2) Local brain — QVAC loads the model into memory (on-device, no cloud).
   const modelName = config.model.localPath ? config.model.localPath.split("/").pop() : config.model.name;
-  process.stdout.write(c.dim("   ") + c.qvac("QVAC") + c.dim(` · loading ${modelName}${METAL ? " on Metal" : ""}… `));
+  printw(c.dim("   ") + c.qvac("QVAC") + c.dim(` · loading ${modelName}${METAL ? " on Metal" : ""}… `));
   const t0 = process.hrtime.bigint();
   try {
     await brain.loadBrain();
     const secs = Number(process.hrtime.bigint() - t0) / 1e9;
-    console.log(c.green("ok") + c.dim(` (${secs.toFixed(1)}s)`));
+    println(c.green("ok") + c.dim(` (${secs.toFixed(1)}s)`));
   } catch (err) {
-    console.log(c.red("FAILED") + `\n   ${err.message}`);
-    console.log(c.dim("   (you can still use slash-commands; NL requests need the model)") + "\n");
+    println(c.red("FAILED") + `\n   ${err.message}`);
+    println(c.dim("   (you can still use slash-commands; NL requests need the model)") + "\n");
   }
 
-  console.log(
+  println(
     "\n   " + c.dim("type ") + c.cyan("/help") + c.dim(" for commands, or just talk to it. ") + c.dim("Ctrl-C to quit.") + "\n"
   );
 
-  // Create readline now — after the model load — so it doesn't discard buffered input.
-  rl = createInterface({ input: stdin, output: stdout });
-
-  const history = [{ role: "system", content: systemPrompt() }];
-
-  let closed = false;
-  rl.on("close", () => {
-    closed = true;
-  });
-
-  for (;;) {
-    if (closed) break;
-    let line;
-    try {
-      line = (await rl.question(REPL_PROMPT)).trim();
-    } catch {
-      break; // readline closed (Ctrl-D / EOF / piped input ended)
-    }
-    if (!line) continue;
-
+  // One line through the same dispatch in both modes. Returns "exit" to stop.
+  async function processLine(line, history) {
     if (line.startsWith("/")) {
-      const r = await handleSlash(line);
-      if (r === "exit") break;
-      continue;
+      return await handleSlash(line);
     }
 
-    // Natural language -> ask the local model for an action. The model's raw output
-    // (thinking + JSON) streams dimmed; the executed result prints bright below it.
+    // Natural language -> ask the local model for an action. The model's raw
+    // output (thinking + JSON) streams dimmed to the conversational surface;
+    // the executed result prints bright on stdout.
     history.push({ role: "user", content: line });
-    process.stdout.write("  " + DIM);
+    printw("  " + DIM);
     let raw = "";
     try {
-      raw = await brain.complete(history, (t) => process.stdout.write(t));
-      process.stdout.write(RST + "\n");
+      raw = await brain.complete(history, (t) => printw(t));
+      printw(RST + "\n");
     } catch (err) {
-      process.stdout.write(RST);
-      console.log(c.red(`  model error: ${err.message}`) + "\n");
-      continue;
+      printw(RST);
+      println(c.red(`  model error: ${err.message}`) + "\n");
+      if (SCRIPTED) hadFailure = true;
+      return true;
     }
     history.push({ role: "assistant", content: raw });
 
     const action = parseAction(raw);
     const handled = await handleAction(action);
-    if (!handled) console.log(""); // model chose to just chat; its text already streamed
+    if (!handled) println(""); // model chose to just chat; its text already streamed
+    return true;
+  }
+
+  const history = [{ role: "system", content: systemPrompt() }];
+
+  if (SCRIPTED) {
+    // Scripted mode: no readline at all. Execute the buffered lines in order;
+    // answer lines are consumed by ask() inside confirmations as they come up.
+    while (scriptLines.length) {
+      const line = scriptLines.shift();
+      process.stderr.write(REPL_PROMPT + line + "\n");
+      const r = await processLine(line, history);
+      if (r === "exit") break;
+    }
+  } else {
+    // Interactive mode: create readline now — after the model load — so it
+    // doesn't discard buffered input.
+    rl = createInterface({ input: stdin, output: stdout });
+
+    let closed = false;
+    rl.on("close", () => {
+      closed = true;
+    });
+
+    for (;;) {
+      if (closed) break;
+      let line;
+      try {
+        line = (await rl.question(REPL_PROMPT)).trim();
+      } catch {
+        break; // readline closed (Ctrl-D / EOF)
+      }
+      if (!line) continue;
+      const r = await processLine(line, history);
+      if (r === "exit") break;
+    }
   }
 
   await brain.unloadBrain().catch(() => {});
   wallet.dispose();
-  rl.close();
+  rl?.close();
+  if (SCRIPTED) {
+    // The QVAC worker keeps the event loop alive; in scripted mode there is no
+    // readline to close and end it, so exit explicitly once the script is done.
+    process.exit(hadFailure ? 1 : 0);
+  }
 }
 
 main().catch((err) => {
