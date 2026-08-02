@@ -75,16 +75,19 @@ describe("parseAction — send_token", () => {
 // describeAction — send_token
 // ---------------------------------------------------------------------------
 
+// describeAction now takes the recipient resolveSend() produced: it never re-reads the raw
+// model output, so a caller that has not resolved gets "[recipient not resolved]" rather than
+// an address it was never given. These calls pass one.
 describe("describeAction — send_token", () => {
   it("describes send_token with symbol", () => {
-    const out = describeAction({ action: "send_token", token: "USDC", to: "0xabc", amount: "10" });
+    const out = describeAction({ action: "send_token", token: "USDC", to: "0xabc", amount: "10" }, { ok: true, address: "0xabc" });
     assert.ok(out.includes("USDC"), `expected USDC in "${out}"`);
     assert.ok(out.includes("0xabc"), `expected address in "${out}"`);
     assert.ok(out.includes("10"), `expected amount in "${out}"`);
   });
 
   it("describes send_token with contract address", () => {
-    const out = describeAction({ action: "send_token", token: "0x534b2f3A21130d7a60830c2Df862319e593943A3", to: "0xabc", amount: "5" });
+    const out = describeAction({ action: "send_token", token: "0x534b2f3A21130d7a60830c2Df862319e593943A3", to: "0xabc", amount: "5" }, { ok: true, address: "0xabc" });
     assert.ok(out.toLowerCase().includes("send"), `expected "send" in "${out}"`);
     assert.ok(out.includes("5"), `expected amount in "${out}"`);
   });
@@ -94,7 +97,7 @@ describe("describeAction — send_token", () => {
       config.gasMode === "dry-run" ? "DRY RUN" :
       config.gasMode === "sponsored" ? "gasless" :
       "you pay gas";
-    const out = describeAction({ action: "send_token", token: "USDC", to: "0xabc", amount: "1" });
+    const out = describeAction({ action: "send_token", token: "USDC", to: "0xabc", amount: "1" }, { ok: true, address: "0xabc" });
     assert.ok(out.includes(expected), `expected "${expected}" in "${out}"`);
   });
 

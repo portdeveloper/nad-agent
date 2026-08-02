@@ -53,6 +53,7 @@ npm start                   # interactive REPL
 - `src/config.mjs` — env → resolved config (the only machine-specific behavior)
 - `src/wallet.mjs` — WDK Safe ERC-4337 account on Monad (+ dry-run + tx-hash resolution)
 - `src/agent.mjs` — QVAC: load / stream / unload the local model
+- `src/addressBook.mjs` — recipient resolution: alias → address, validation, refusals
 - `src/tools.mjs` — wallet actions + NL→action interpreter (v0 JSON protocol)
 - `src/cli.mjs` — the interactive REPL / TUI
 - `scripts/` — doctor · gen-seed · fetch-model · build

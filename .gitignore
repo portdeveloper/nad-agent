@@ -8,6 +8,9 @@ dist/
 .env
 .env.local
 
+# Your local address book — who you pay. Never commit.
+address-book.json
+
 # Model weights — downloaded per-machine (registry on fast hosts; fetch-model on slow ones)
 models/
 *.gguf

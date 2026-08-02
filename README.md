@@ -26,11 +26,42 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 - **`what's my balance?`** → live MON balance, read from Monad
 - **`what's my USDC balance?`** → ERC-20 balance read by known testnet symbol or token address
 - **`send 0.1 MON to 0x…`** → asks you to confirm, then broadcasts a **gasless** transfer (the wallet pays 0 gas) and returns the on-chain tx hash + explorer link
+- **`send 0.1 MON to alice`** → resolves the name through your local address book and shows the address it resolved to *before* you confirm
 - anything else → the local model just replies in words
 
 It all runs **on-device**: the model never calls the cloud, and the wallet key never leaves the machine.
 
 **Scope (v0):** native MON sends plus read-only ERC-20 balance checks — `get_address`, `get_balance`, `get_token_balance`, `send`. No ERC-20 transfers, swaps, bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
+
+---
+
+## Address book
+
+Monad has no name service yet, so names resolve through `address-book.json`, a file you own,
+sitting next to `.env`:
+
+```json
+{
+  "alice": "0x1111111111111111111111111111111111111111",
+  "treasury": "0x2222222222222222222222222222222222222222"
+}
+```
+
+Point `NAD_ADDRESS_BOOK` elsewhere if you like. With no file you have no aliases and raw `0x…`
+addresses behave exactly as before. The file is gitignored — not a secret like a seed, but it is
+the list of who you pay, and anyone who can edit it can change where your sends go.
+
+The confirm step always shows the address behind a name, because that is what gets signed:
+
+```
+Send 0.1 MON -> 0x8ba1f109551bD432803012645Ac136ddd64DBA72  (alias: alice)  (DRY RUN — will be simulated)
+confirm? [y/N]
+```
+
+Resolution refuses rather than guesses. An unknown name, an entry whose address is malformed, or
+one name spelled two ways (`alice` and `Alice`) with two different addresses are each reported and
+the send is declined — a wrong recipient is not recoverable. A key repeated verbatim is JSON's own
+business: `{"alice": A, "alice": B}` means B, and the parser settles it before we see the file.
 
 ---
 
@@ -145,11 +176,12 @@ open a PR. Security bugs go through [SECURITY.md](./SECURITY.md), not public iss
 ## Layout
 
 ```
-src/config.mjs   env → resolved config (the only machine-specific behavior)
-src/wallet.mjs   WDK Safe ERC-4337 account on Monad (+ dry-run)
-src/agent.mjs    QVAC local model: load / stream / unload
-src/tools.mjs    wallet actions + NL→action interpreter
-src/tokens.mjs   built-in ERC-20 token symbols for balance reads
-src/cli.mjs      the REPL
-scripts/         doctor · gen-seed · fetch-model · build
+src/config.mjs       env → resolved config (the only machine-specific behavior)
+src/wallet.mjs       WDK Safe ERC-4337 account on Monad (+ dry-run)
+src/agent.mjs        QVAC local model: load / stream / unload
+src/addressBook.mjs  recipient resolution: alias → address
+src/tools.mjs        wallet actions + NL→action interpreter
+src/tokens.mjs       built-in ERC-20 token symbols for balance reads
+src/cli.mjs          the REPL
+scripts/             doctor · gen-seed · fetch-model · build
 ```

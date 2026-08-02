@@ -9,8 +9,9 @@
 
 import * as wallet from "./wallet.mjs";
 import { config } from "./config.mjs";
-import { parseMon, formatMon, formatTokenUnits, parseTokenAmount, isAddress, toChecksumAddress } from "./format.mjs";
+import { parseMon, formatMon, formatTokenUnits, parseTokenAmount, isAddress } from "./format.mjs";
 import { listKnownTokenSymbols, resolveToken } from "./tokens.mjs";
+import { resolveRecipient, formatRecipient } from "./addressBook.mjs";
 
 export const ACTIONS = {
   get_address: { args: [], desc: "Show the agent's own wallet address." },
@@ -19,10 +20,10 @@ export const ACTIONS = {
     args: ["token"],
     desc: "Show an ERC-20 token balance by token symbol or contract address.",
   },
-  send_mon: { args: ["to", "amountMon"], desc: "Send native MON to an address `to`, amount in MON as a string." },
+  send_mon: { args: ["to", "amountMon"], desc: "Send native MON to `to` — a 0x address or an address-book name — amount in MON as a string." },
   send_token: {
     args: ["token", "to", "amount"],
-    desc: "Send an ERC-20 token to an address `to`. `token` is a symbol (e.g. USDC) or contract address. `amount` is a human-readable string.",
+    desc: "Send an ERC-20 token to `to` — a 0x address or an address-book name. `token` is a symbol (e.g. USDC) or contract address. `amount` is a human-readable string.",
   },
   none: { args: [], desc: "The message is not an on-chain request; just reply in words." },
 };
@@ -98,13 +99,26 @@ export function parseAction(text) {
   return { action: "none" };
 }
 
+/**
+ * Resolve a send's recipient ONCE, before anything is shown or signed.
+ *
+ * Callers refuse before prompting: asking someone to confirm a transfer that is already
+ * going to be declined teaches them the prompt is a formality.
+ */
+export function resolveSend(a) {
+  if (!isWrite(a.action)) return { ok: true, recipient: null };
+  const r = resolveRecipient(a.to);
+  if (!r.ok) return { ok: false, reason: r.reason };
+  return { ok: true, recipient: r };
+}
+
 /** True if the action mutates chain state and should require confirmation. */
 export function isWrite(action) {
   return action === "send_mon" || action === "send_token";
 }
 
 /** Human-readable preview of what an action will do (shown before confirmation). */
-export function describeAction(a) {
+export function describeAction(a, resolved) {
   switch (a.action) {
     case "get_address":
       return "Read: your wallet address";
@@ -112,12 +126,21 @@ export function describeAction(a) {
       return "Read: your MON balance";
     case "get_token_balance":
       return `Read: your ${a.token ?? a.symbol ?? a.tokenAddress ?? "token"} token balance`;
-    case "send_mon":
-      return `Send ${a.amountMon} ${SYMBOL()} -> ${a.to}` +
+    case "send_mon": {
+      // `resolved` is a separate argument, never a field on `a`: `a` is built from model
+      // output. There is deliberately no fallback that resolves here — a second resolution
+      // path would re-read the book at display time, and the gap before the operator presses
+      // y is exactly when the file can change. No resolution means no address to approve.
+      const target = resolved?.ok ? formatRecipient(resolved) : "[recipient not resolved]";
+      return `Send ${a.amountMon} ${SYMBOL()} -> ${target}` +
         (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
+    }
     case "send_token": {
+      // Same rule as send_mon: the line the operator approves shows what was resolved, never
+      // the raw model output. isWrite() covers send_token, so resolveSend() has already run.
       const label = a.tokenSymbol || a.token || "token";
-      return `Send ${a.amount} ${label} -> ${a.to}` +
+      const dest = resolved?.ok ? formatRecipient(resolved) : "[recipient not resolved]";
+      return `Send ${a.amount} ${label} -> ${dest}` +
         (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
     }
     default:
@@ -178,7 +201,24 @@ export function renderSendPreview(p) {
 }
 
 /** Execute an action. Returns a printable string. Assumes wallet is initialized for chain ops. */
-export async function runAction(a, resolvedTo = null) {
+export async function runAction(a, resolved) {
+  // Read `resolved.address` once, here, and use that copy everywhere below: a getter or a
+  // Proxy that answers the check with a valid address and the signature with another one is
+  // otherwise free to do so. Padding is refused rather than trimmed, because isAddress()
+  // trims internally and " 0x… " would reach the confirm line ragged. isAddress() rejects
+  // every non-string, and `||` short-circuits before .trim().
+  //
+  // No fallback that resolves here when the argument is missing: a second resolution path
+  // would re-read the book after the operator approved, and the gap before they press y is
+  // exactly when the file can change. Direct callers resolve through resolveSend() first.
+  const to = resolved?.address;
+  if (isWrite(a.action) && (resolved?.ok !== true || !isAddress(to) || to !== to.trim())) {
+    return `Refused: ${a.action} requires a recipient resolved by resolveSend() before the confirmation`;
+  }
+  // Built from the copy above, once, for every branch below. Calling formatRecipient(resolved)
+  // at each receipt line would read the getter again, which is the same door the check above
+  // closes — and send_token did exactly that until this was hoisted.
+  const shown = isWrite(a.action) ? formatRecipient({ address: to, name: resolved.name }) : null;
   switch (a.action) {
     case "get_address":
       return wallet.getAddress() ?? "(wallet not initialized)";
@@ -219,43 +259,34 @@ export async function runAction(a, resolvedTo = null) {
     }
 
     case "send_mon": {
-      // Single resolution point: the CLI passes the previewed address through,
-      // so nothing re-resolves between the y/N prompt and the signature.
-      // Direct callers (e2e, library use) fall back to resolving here.
-      let to = resolvedTo;
-      if (!to) {
-        try {
-          to = toChecksumAddress(a.to);
-        } catch {
-          return `Refused: "${a.to}" is not a valid address (checksum failed).`;
-        }
-      }
       const value = parseMon(a.amountMon);
       const res = await wallet.send(to, value);
       if (res.dryRun) {
         return (
-          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${to}\n` +
+          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${shown}\n` +
           `  (est. fee ${formatMon(res.fee)} ${SYMBOL()}). Set PIMLICO_API_KEY in .env to broadcast for real.`
         );
       }
       if (res.hash) {
         const url = `${config.chain.explorerUrl}/tx/${res.hash}`;
         return (
-          `Sent ${a.amountMon} ${SYMBOL()} to ${to}\n` +
+          `Sent ${a.amountMon} ${SYMBOL()} to ${shown}\n` +
           `  tx:     ${res.hash}\n  ${url}\n` +
           `  userOp: ${res.userOpHash}`
         );
       }
       // Broadcast, but the receipt hasn't landed within the wait window.
       return (
-        `Submitted ${a.amountMon} ${SYMBOL()} to ${to} (gasless UserOp)\n` +
+        `Submitted ${a.amountMon} ${SYMBOL()} to ${shown} (gasless UserOp)\n` +
         `  userOp: ${res.userOpHash}\n` +
         `  (not confirmed on-chain yet — should land shortly; re-check /balance)`
       );
     }
 
     case "send_token": {
-      if (!isAddress(a.to)) return `Refused: "${a.to}" is not a valid address.`;
+      // `to` is the address resolveSend() produced and the boundary above validated. Using
+      // a.to here would re-read model output and, for an address-book name, hand the raw
+      // alias to isAddress() — the guard would pass and the send would fail confusingly.
       const input = a.token ?? a.tokenSymbol ?? a.tokenAddress ?? "";
       if (!input) return "Refused: no token specified. Use a symbol (e.g. USDC) or contract address.";
 
@@ -269,12 +300,12 @@ export async function runAction(a, resolvedTo = null) {
       const amountWei = parseTokenAmount(a.amount, token.decimals);
       if (amountWei === null) return `Refused: "${a.amount}" is not a valid token amount.`;
 
-      const res = await wallet.sendToken(a.to, token.address, amountWei);
+      const res = await wallet.sendToken(to, token.address, amountWei);
       const label = token.symbol || token.address;
 
       if (res.dryRun) {
         return (
-          `DRY RUN — would send ${a.amount} ${label} to ${a.to}\n` +
+          `DRY RUN — would send ${a.amount} ${label} to ${shown}\n` +
           `  token: ${token.address}\n` +
           `  (est. fee ${formatMon(res.fee)} ${SYMBOL()}). Set PIMLICO_API_KEY in .env to broadcast for real.`
         );
@@ -282,14 +313,14 @@ export async function runAction(a, resolvedTo = null) {
       if (res.hash) {
         const url = `${config.chain.explorerUrl}/tx/${res.hash}`;
         return (
-          `Sent ${a.amount} ${label} to ${a.to}\n` +
+          `Sent ${a.amount} ${label} to ${shown}\n` +
           `  token:  ${token.address}\n` +
           `  tx:     ${res.hash}\n  ${url}\n` +
           `  userOp: ${res.userOpHash}`
         );
       }
       return (
-        `Submitted ${a.amount} ${label} to ${a.to} (gasless UserOp)\n` +
+        `Submitted ${a.amount} ${label} to ${shown} (gasless UserOp)\n` +
         `  token:  ${token.address}\n` +
         `  userOp: ${res.userOpHash}\n` +
         `  (not confirmed on-chain yet — should land shortly; re-check /balance)`

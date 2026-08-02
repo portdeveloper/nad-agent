@@ -55,9 +55,9 @@ const println = (...a) => (SCRIPTED ? console.error(...a) : console.log(...a));
 const printw = (s) => (SCRIPTED ? process.stderr.write(s) : process.stdout.write(s));
 
 import { config } from "./config.mjs";
-import { toChecksumAddress } from "./format.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
+import { addressBookWarnings, formatRecipient } from "./addressBook.mjs";
 import {
   ACTIONS,
   systemPrompt,
@@ -67,6 +67,7 @@ import {
   isWrite,
   previewSend,
   renderSendPreview,
+  resolveSend,
 } from "./tools.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
@@ -185,35 +186,35 @@ async function confirm(question) {
 
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
 async function handleAction(action) {
-  let sendPreviewTo = null;
+  let resolved = null;
   if (action.action === "none") return false;
   if (isWrite(action.action)) {
-    // Send: resolve the recipient ONCE, then build the preview from the
-    // resolved address. A bad checksum is refused before the prompt; an
-    // over-balance send is surfaced as a WARNING in the block and still
-    // prompts (per #24). When #42's address book lands, its name resolution
-    // slots in right here, before this checksum step.
+    // Resolve the recipient ONCE, before anything is shown, and hold it for the whole flow:
+    // the address on screen is the address that gets signed, even if the address book changes
+    // while the prompt is open. resolveSend covers a book name and a raw address alike, so it
+    // replaces the inline checksum step this block used to do.
+    const prep = resolveSend(action);
+    if (!prep.ok) {
+      println(c.red(`  Refused: ${prep.reason}`) + "\n");
+      if (SCRIPTED) hadFailure = true;
+      return true;
+    }
+    resolved = prep.recipient;
     if (action.action === "send_mon") {
-      let resolvedTo;
-      try {
-        resolvedTo = toChecksumAddress(action.to);
-      } catch {
-        println(c.red(`  Refused: "${action.to}" is not a valid address (checksum failed).`) + "\n");
-        if (SCRIPTED) hadFailure = true;
-        return true;
-      }
       let preview;
       try {
-        preview = await previewSend(action, resolvedTo);
+        preview = await previewSend(action, resolved.address);
       } catch (err) {
         println(c.red(`  Refused: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;
         return true;
       }
-      println("\n  " + c.yellow(renderSendPreview(preview).replace(/\n/g, "\n  ")));
-      sendPreviewTo = preview.to;
+      // Quoted against the bare address; shown with the alias beside it, so the operator
+      // approves the same thing the book produced.
+      const block = renderSendPreview({ ...preview, to: formatRecipient(resolved) });
+      println("\n  " + c.yellow(block.replace(/\n/g, "\n  ")));
     } else {
-      println("\n  " + c.yellow(describeAction(action)));
+      println("\n  " + c.yellow(describeAction(action, resolved)));
     }
     if (!(await confirmMainnetOnce())) {
       println(c.dim("  cancelled.") + "\n");
@@ -225,7 +226,7 @@ async function handleAction(action) {
     }
   }
   try {
-    const out = await runAction(action, sendPreviewTo);
+    const out = await runAction(action, resolved);
     if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
   } catch (err) {
     console.log(c.red(`  error: ${err.message}`) + "\n");
@@ -306,6 +307,7 @@ async function main() {
     println(c.red("FAILED") + `\n   ${err.message}`);
     println(c.dim("   (you can still use slash-commands; NL requests need the model)") + "\n");
   }
+  for (const w of addressBookWarnings()) println("   " + c.yellow("address book: ") + w);
 
   println(
     "\n   " + c.dim("type ") + c.cyan("/help") + c.dim(" for commands, or just talk to it. ") + c.dim("Ctrl-C to quit.") + "\n"
