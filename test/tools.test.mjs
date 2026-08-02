@@ -8,6 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ACTIONS, parseAction, isWrite, describeAction, systemPrompt, runAction } from "../src/tools.mjs";
+import { config } from "../src/config.mjs";
 
 // ---------------------------------------------------------------------------
 // parseAction — JSON path
@@ -148,13 +149,13 @@ describe("describeAction", () => {
     assert.equal(describeAction({ action: "get_balance" }), "Read: your MON balance");
   });
 
-  it("send_mon mentions dry-run in dry-run mode", () => {
-    const prev = process.env.WDK_GAS_MODE;
-    process.env.WDK_GAS_MODE = "dry-run";
+  it("send_mon gas label matches the resolved config.gasMode", () => {
+    const expected =
+      config.gasMode === "dry-run" ? "DRY RUN" :
+      config.gasMode === "sponsored" ? "gasless" :
+      "you pay gas";
     const out = describeAction({ action: "send_mon", to: "0xabc", amountMon: "1" });
-    assert.ok(out.includes("DRY RUN"), `expected dry-run marker in "${out}"`);
-    if (prev === undefined) delete process.env.WDK_GAS_MODE;
-    else process.env.WDK_GAS_MODE = prev;
+    assert.ok(out.includes(expected), `expected "${expected}" in "${out}"`);
   });
 
   it("unknown action → No on-chain action", () => {
