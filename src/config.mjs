@@ -44,6 +44,8 @@ else gasMode = "sponsored";
 
 export const config = {
   chain,
+  // Convenience flag for guardrails: mainnet moves real funds.
+  isMainnet: network === "mainnet",
   gasMode,
   sponsorshipPolicyId,
   // ERC-4337 needs a bundler+paymaster. For a LOCAL CLI the Pimlico key stays on
@@ -69,6 +71,7 @@ export function describeConfig() {
     `network:  ${config.chain.name} (chainId ${config.chain.chainId})`,
     `rpc:      ${config.chain.rpcUrl}`,
     `gas mode: ${config.gasMode}${config.gasMode === "dry-run" ? "  (sends are simulated — set PIMLICO_API_KEY to broadcast)" : ""}`,
+    ...(config.isMainnet ? ["warning:  MAINNET — sends move real MON"] : []),
     `model:    ${config.model.localPath || config.model.name}`,
   ].join("\n");
 }

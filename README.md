@@ -69,7 +69,7 @@ Recommended `.env` on an M4 Max (36 GB):
 
 ```ini
 WDK_SEED="…24 words…"
-MONAD_NETWORK=testnet
+MONAD_NETWORK=testnet                 # or mainnet: red banner + one-time real-funds acknowledgement before the first send
 QVAC_MODEL=QWEN3_8B_INST_Q4_K_M       # ChatML instruct — verified tool-calling on Metal
 QVAC_CTX_SIZE=8192
 # PIMLICO_API_KEY=…                   # leave blank to dry-run; set to broadcast real txs
