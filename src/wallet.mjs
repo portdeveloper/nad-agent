@@ -108,6 +108,7 @@ export async function quoteSend(to, valueWei) {
  */
 export async function send(to, valueWei) {
   if (!account) throw new Error("Wallet not initialized");
+  to = checksumAddress(to); // final guard at the signing boundary: never sign to a non-canonical/invalid address
   if (config.gasMode === "dry-run") {
     let fee = 0n;
     try {
@@ -131,6 +132,7 @@ export async function send(to, valueWei) {
  */
 export async function sendToken(to, tokenAddress, amountWei) {
   if (!account) throw new Error("Wallet not initialized");
+  to = checksumAddress(to); // final guard at the signing boundary: never sign to a non-canonical/invalid address
   if (config.gasMode === "dry-run") {
     let fee = 0n;
     try {

@@ -7,10 +7,84 @@
  * or the official @tetherto/wdk-mcp-toolkit MCP server — see README "Upgrade path".
  */
 
+import { readFileSync } from "node:fs";
+import { getAddress } from "ethers";
 import * as wallet from "./wallet.mjs";
 import { config } from "./config.mjs";
 import { parseMon, formatMon, formatTokenUnits, parseTokenAmount, isAddress } from "./format.mjs";
 import { listKnownTokenSymbols, resolveToken } from "./tokens.mjs";
+
+// Address-book name resolution (issue #2): a send takes a raw 0x address or a
+// name from a local JSON book. Monad has no name service yet, so a local file is
+// the accepted v0. The name resolves to a checksummed address BEFORE the confirm
+// step; a transfer can't be undone, so anything unknown, ambiguous or malformed
+// is refused with a reason rather than guessed at.
+function loadAddressBook() {
+  let text;
+  try {
+    text = readFileSync(config.addressBookPath, "utf8");
+  } catch {
+    return {}; // no file: aliases unavailable, raw 0x addresses still work
+  }
+  const book = JSON.parse(text);
+  if (book === null || typeof book !== "object" || Array.isArray(book)) {
+    throw new Error("expected a JSON object of name -> address");
+  }
+  return book;
+}
+
+/**
+ * Pure resolver: an input + an already-loaded book -> { ok, address, name } or
+ * { ok:false, reason }. Names match case-insensitively; a raw address passes
+ * through (name is null). No file IO, so it is easy to test in isolation.
+ */
+export function resolveInBook(input, book = {}) {
+  const raw = String(input ?? "").trim();
+  if (!raw) return { ok: false, reason: "no recipient given." };
+
+  // Raw 0x address: canonicalize it. getAddress accepts all-lower/all-upper and
+  // verifies the EIP-55 checksum on mixed case, so a mistyped address is caught
+  // here instead of being broadcast to the wrong place.
+  if (isAddress(raw)) {
+    try {
+      return { ok: true, address: getAddress(raw), name: null };
+    } catch {
+      return { ok: false, reason: `"${raw}" is not a valid address (checksum failed — check for a typo).` };
+    }
+  }
+
+  // Otherwise it is an address-book name. The same name mapped to two different
+  // addresses is ambiguous, not a coin toss.
+  const lower = raw.toLowerCase();
+  const matches = Object.entries(book).filter(([name]) => name.toLowerCase() === lower);
+  if (matches.length === 0) {
+    return { ok: false, reason: `"${raw}" is not a known name in the address book and is not a 0x address.` };
+  }
+  const distinct = new Set(matches.map(([, addr]) => String(addr).trim().toLowerCase()));
+  if (distinct.size > 1) {
+    return { ok: false, reason: `"${raw}" is ambiguous: the address book maps it to ${distinct.size} different addresses.` };
+  }
+  const [name, addr] = matches[0];
+  try {
+    return { ok: true, address: getAddress(String(addr).trim()), name };
+  } catch {
+    return { ok: false, reason: `the address book entry for "${name}" (${addr}) is not a valid address.` };
+  }
+}
+
+/** Resolve a recipient against the on-disk address book (config.addressBookPath). */
+export function resolveRecipient(input) {
+  const raw = String(input ?? "").trim();
+  // A raw address needs no book, so a broken book file never blocks a 0x send.
+  if (isAddress(raw)) return resolveInBook(raw);
+  let book;
+  try {
+    book = loadAddressBook();
+  } catch (err) {
+    return { ok: false, reason: `could not read the address book (${config.addressBookPath}): ${err.message}` };
+  }
+  return resolveInBook(raw, book);
+}
 
 export const ACTIONS = {
   get_address: { args: [], desc: "Show the agent's own wallet address." },
@@ -19,10 +93,10 @@ export const ACTIONS = {
     args: ["token"],
     desc: "Show an ERC-20 token balance by token symbol or contract address.",
   },
-  send_mon: { args: ["to", "amountMon"], desc: "Send native MON to an address `to`, amount in MON as a string." },
+  send_mon: { args: ["to", "amountMon"], desc: "Send native MON to `to` (a 0x address or an address-book name), amount in MON as a string." },
   send_token: {
     args: ["token", "to", "amount"],
-    desc: "Send an ERC-20 token to an address `to`. `token` is a symbol (e.g. USDC) or contract address. `amount` is a human-readable string.",
+    desc: "Send an ERC-20 token to `to` (a 0x address or an address-book name). `token` is a symbol (e.g. USDC) or contract address. `amount` is a human-readable string.",
   },
   none: { args: [], desc: "The message is not an on-chain request; just reply in words." },
 };
@@ -103,8 +177,25 @@ export function isWrite(action) {
   return action === "send_mon" || action === "send_token";
 }
 
+// The gas-mode suffix shown after a send preview.
+function gasSuffix() {
+  return config.gasMode === "dry-run"
+    ? "  (DRY RUN — will be simulated)"
+    : config.gasMode === "sponsored"
+      ? "  (gasless)"
+      : "  (you pay gas)";
+}
+
+// How the recipient reads in a preview or result. A resolved recipient (from
+// resolveRecipient) is preferred so the address shown is the one that gets
+// signed; without it we fall back to the raw target so a preview never throws.
+function destLabel(rawTo, resolved) {
+  if (resolved?.ok) return resolved.name ? `${resolved.name} (${resolved.address})` : resolved.address;
+  return String(rawTo ?? "");
+}
+
 /** Human-readable preview of what an action will do (shown before confirmation). */
-export function describeAction(a) {
+export function describeAction(a, resolved) {
   switch (a.action) {
     case "get_address":
       return "Read: your wallet address";
@@ -113,12 +204,10 @@ export function describeAction(a) {
     case "get_token_balance":
       return `Read: your ${a.token ?? a.symbol ?? a.tokenAddress ?? "token"} token balance`;
     case "send_mon":
-      return `Send ${a.amountMon} ${SYMBOL()} -> ${a.to}` +
-        (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
+      return `Send ${a.amountMon} ${SYMBOL()} -> ${destLabel(a.to, resolved)}` + gasSuffix();
     case "send_token": {
       const label = a.tokenSymbol || a.token || "token";
-      return `Send ${a.amount} ${label} -> ${a.to}` +
-        (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
+      return `Send ${a.amount} ${label} -> ${destLabel(a.to, resolved)}` + gasSuffix();
     }
     default:
       return "No on-chain action";
@@ -126,7 +215,7 @@ export function describeAction(a) {
 }
 
 /** Execute an action. Returns a printable string. Assumes wallet is initialized for chain ops. */
-export async function runAction(a) {
+export async function runAction(a, resolved) {
   switch (a.action) {
     case "get_address":
       return wallet.getAddress() ?? "(wallet not initialized)";
@@ -167,33 +256,36 @@ export async function runAction(a) {
     }
 
     case "send_mon": {
-      if (!isAddress(a.to)) return `Refused: "${a.to}" is not a valid address.`;
+      const r = resolved ?? resolveRecipient(a.to);
+      if (!r.ok) return `Refused: ${r.reason}`;
       const value = parseMon(a.amountMon);
-      const res = await wallet.send(a.to, value);
+      const res = await wallet.send(r.address, value);
+      const dest = r.name ? `${r.name} (${r.address})` : r.address;
       if (res.dryRun) {
         return (
-          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${a.to}\n` +
+          `DRY RUN — would send ${a.amountMon} ${SYMBOL()} to ${dest}\n` +
           `  (est. fee ${formatMon(res.fee)} ${SYMBOL()}). Set PIMLICO_API_KEY in .env to broadcast for real.`
         );
       }
       if (res.hash) {
         const url = `${config.chain.explorerUrl}/tx/${res.hash}`;
         return (
-          `Sent ${a.amountMon} ${SYMBOL()} to ${a.to}\n` +
+          `Sent ${a.amountMon} ${SYMBOL()} to ${dest}\n` +
           `  tx:     ${res.hash}\n  ${url}\n` +
           `  userOp: ${res.userOpHash}`
         );
       }
       // Broadcast, but the receipt hasn't landed within the wait window.
       return (
-        `Submitted ${a.amountMon} ${SYMBOL()} to ${a.to} (gasless UserOp)\n` +
+        `Submitted ${a.amountMon} ${SYMBOL()} to ${dest} (gasless UserOp)\n` +
         `  userOp: ${res.userOpHash}\n` +
         `  (not confirmed on-chain yet — should land shortly; re-check /balance)`
       );
     }
 
     case "send_token": {
-      if (!isAddress(a.to)) return `Refused: "${a.to}" is not a valid address.`;
+      const r = resolved ?? resolveRecipient(a.to);
+      if (!r.ok) return `Refused: ${r.reason}`;
       const input = a.token ?? a.tokenSymbol ?? a.tokenAddress ?? "";
       if (!input) return "Refused: no token specified. Use a symbol (e.g. USDC) or contract address.";
 
@@ -207,12 +299,13 @@ export async function runAction(a) {
       const amountWei = parseTokenAmount(a.amount, token.decimals);
       if (amountWei === null) return `Refused: "${a.amount}" is not a valid token amount.`;
 
-      const res = await wallet.sendToken(a.to, token.address, amountWei);
+      const res = await wallet.sendToken(r.address, token.address, amountWei);
       const label = token.symbol || token.address;
+      const dest = r.name ? `${r.name} (${r.address})` : r.address;
 
       if (res.dryRun) {
         return (
-          `DRY RUN — would send ${a.amount} ${label} to ${a.to}\n` +
+          `DRY RUN — would send ${a.amount} ${label} to ${dest}\n` +
           `  token: ${token.address}\n` +
           `  (est. fee ${formatMon(res.fee)} ${SYMBOL()}). Set PIMLICO_API_KEY in .env to broadcast for real.`
         );
@@ -220,14 +313,14 @@ export async function runAction(a) {
       if (res.hash) {
         const url = `${config.chain.explorerUrl}/tx/${res.hash}`;
         return (
-          `Sent ${a.amount} ${label} to ${a.to}\n` +
+          `Sent ${a.amount} ${label} to ${dest}\n` +
           `  token:  ${token.address}\n` +
           `  tx:     ${res.hash}\n  ${url}\n` +
           `  userOp: ${res.userOpHash}`
         );
       }
       return (
-        `Submitted ${a.amount} ${label} to ${a.to} (gasless UserOp)\n` +
+        `Submitted ${a.amount} ${label} to ${dest} (gasless UserOp)\n` +
         `  token:  ${token.address}\n` +
         `  userOp: ${res.userOpHash}\n` +
         `  (not confirmed on-chain yet — should land shortly; re-check /balance)`

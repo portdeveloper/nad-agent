@@ -7,7 +7,7 @@
  * Reliable slash-commands bypass the model entirely:
  *   /address           show the agent's wallet address
  *   /balance [token]   show native MON or ERC-20 token balance
- *   /send <to> <mon>   send MON (asks for confirmation)
+ *   /send <to|name> <mon>   send MON (asks for confirmation)
  *   /config /help /exit
  */
 
@@ -64,6 +64,7 @@ import {
   runAction,
   describeAction,
   isWrite,
+  resolveRecipient,
 } from "./tools.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
@@ -183,8 +184,18 @@ async function confirm(question) {
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
 async function handleAction(action) {
   if (action.action === "none") return false;
+  let resolved;
   if (isWrite(action.action)) {
-    console.log("\n  " + c.yellow(describeAction(action)));
+    // Resolve the recipient ONCE, before the preview and the confirm, so the
+    // address the user approves is exactly the one that gets signed. The book is
+    // an editable file; re-reading it after "y" could change the destination.
+    resolved = resolveRecipient(action.to);
+    if (!resolved.ok) {
+      console.log("\n  " + c.red(`Refused: ${resolved.reason}`) + "\n");
+      if (SCRIPTED) hadFailure = true;
+      return true;
+    }
+    console.log("\n  " + c.yellow(describeAction(action, resolved)));
     if (!(await confirmMainnetOnce())) {
       console.log(c.dim("  cancelled.") + "\n");
       return true;
@@ -195,7 +206,7 @@ async function handleAction(action) {
     }
   }
   try {
-    const out = await runAction(action);
+    const out = await runAction(action, resolved);
     if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
   } catch (err) {
     console.log(c.red(`  error: ${err.message}`) + "\n");
@@ -224,7 +235,7 @@ async function handleSlash(line) {
         "\n  " + c.violet(c.bold("commands")) + "\n" +
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance [token]") + c.dim("   native MON or ERC-20 balance") + "\n" +
-          "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
+          "  " + c.cyan("/send <to|name> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
           "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
           "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
       );

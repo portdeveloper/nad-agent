@@ -8,6 +8,9 @@
  * at a Monad RPC + chainId — values from docs.monad.xyz.
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 const NETWORKS = {
   testnet: {
     chainId: 10143,
@@ -64,6 +67,10 @@ export const config = {
     maxTokens: Number(process.env.QVAC_MAX_TOKENS || 256),
   },
   hasPimlicoKey: !!pimlicoKey,
+  // Local address book: name -> 0x address, resolved before a send is built. A
+  // missing file just means no aliases (raw 0x addresses always work). Defaults
+  // to the user's home so it survives re-clones and never sits inside the repo.
+  addressBookPath: process.env.NAD_ADDRESSBOOK || join(homedir(), ".nad-agent", "addressbook.json"),
 };
 
 export function describeConfig() {

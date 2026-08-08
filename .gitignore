@@ -12,6 +12,11 @@ dist/
 models/
 *.gguf
 
+# Address book — your contacts (who you pay). The default lives in ~/.nad-agent/,
+# but ignore a repo-local one too so it never gets committed.
+addressbook.json
+address-book.json
+
 # OS / editor
 .DS_Store
 *.log

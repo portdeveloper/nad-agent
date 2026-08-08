@@ -26,6 +26,7 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 - **`what's my balance?`** → live MON balance, read from Monad
 - **`what's my USDC balance?`** → ERC-20 balance read by known testnet symbol or token address
 - **`send 0.1 MON to 0x…`** → asks you to confirm, then broadcasts a **gasless** transfer (the wallet pays 0 gas) and returns the on-chain tx hash + explorer link
+- **`send 0.1 MON to alice`** → resolves the name from a local address book to a 0x address, shows the resolved address in the confirm step, then sends (raw `0x…` addresses still work)
 - anything else → the local model just replies in words
 
 It all runs **on-device**: the model never calls the cloud, and the wallet key never leaves the machine.
@@ -91,7 +92,7 @@ Then talk to it:
 › send 0.1 MON to 0xABCD…            # asks you to confirm, then broadcasts (or dry-runs)
 ```
 
-Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/send <to> <mon>` `/config` `/help` `/exit`.
+Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/send <to|name> <mon>` `/config` `/help` `/exit`.
 
 ---
 
@@ -101,6 +102,17 @@ Or use the reliable slash-commands (no model needed): `/address` `/balance` `/ba
 - **`PIMLICO_API_KEY` set** → sends broadcast for real via ERC-4337. Add a **`PIMLICO_SPONSORSHIP_POLICY_ID`** to make them **gasless** (the paymaster funds gas). Get both at <https://dashboard.pimlico.io>.
 
 Flipping between these is a one-line `.env` change — no code change.
+
+## Address book (send to a name)
+
+Monad has no name service yet, so recipients can be raw `0x…` addresses or names from a small local
+file: `{ "alice": "0x…", "bob": "0x…" }`. Point `NAD_ADDRESSBOOK` at it (default
+`~/.nad-agent/addressbook.json`); a missing file just means no aliases. The name is resolved to a
+checksummed address **before** the confirm step, and that exact address is what gets signed, so the
+address you approve is the address you send to. A send can't be undone, so resolution refuses rather
+than guesses: an unknown name, a malformed entry, a mistyped-checksum address, or one name mapped to
+two different addresses are each declined with a reason. The default lives in your home directory,
+outside the repo, and a repo-local one is gitignored, so your contacts never land on GitHub.
 
 ## Build step
 
