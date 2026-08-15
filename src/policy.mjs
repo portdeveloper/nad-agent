@@ -94,9 +94,29 @@ export function hasRules(policy) {
  * the allowlist governs the recipient of every write, while the MON amount
  * limits only bind sends actually denominated in MON.
  */
+/** MON amount limits shared by sends and native-in swaps. No recipient. */
+function checkAmountLimits(policy, { value, sessionSpent = 0n }) {
+  const symbol = "MON";
+  if (policy.maxPerSend != null && value > policy.maxPerSend) {
+    return {
+      ok: false,
+      rule: "maxPerSend",
+      message: `amount ${formatMon(value)} ${symbol} is above the policy limit of ${formatMon(policy.maxPerSend)} ${symbol} per send.`,
+    };
+  }
+  if (policy.maxPerSession != null && sessionSpent + value > policy.maxPerSession) {
+    const left = policy.maxPerSession - sessionSpent;
+    return {
+      ok: false,
+      rule: "maxPerSession",
+      message: `this send would exceed the policy session budget of ${formatMon(policy.maxPerSession)} ${symbol} (${formatMon(left > 0n ? left : 0n)} ${symbol} left).`,
+    };
+  }
+  return { ok: true };
+}
+
 export function checkPolicy(policy, { to, value, sessionSpent = 0n }) {
   if (!hasRules(policy)) return { ok: true };
-  const symbol = "MON";
 
   const lower = to.toLowerCase();
   if (policy.allowlist && !policy.allowlist.some((a) => a.toLowerCase() === lower)) {
@@ -108,25 +128,7 @@ export function checkPolicy(policy, { to, value, sessionSpent = 0n }) {
   }
 
   if (value == null) return { ok: true };
-
-  if (policy.maxPerSend != null && value > policy.maxPerSend) {
-    return {
-      ok: false,
-      rule: "maxPerSend",
-      message: `amount ${formatMon(value)} ${symbol} is above the policy limit of ${formatMon(policy.maxPerSend)} ${symbol} per send.`,
-    };
-  }
-
-  if (policy.maxPerSession != null && sessionSpent + value > policy.maxPerSession) {
-    const left = policy.maxPerSession - sessionSpent;
-    return {
-      ok: false,
-      rule: "maxPerSession",
-      message: `this send would exceed the policy session budget of ${formatMon(policy.maxPerSession)} ${symbol} (${formatMon(left > 0n ? left : 0n)} ${symbol} left).`,
-    };
-  }
-
-  return { ok: true };
+  return checkAmountLimits(policy, { value, sessionSpent });
 }
 
 /**
@@ -154,10 +156,7 @@ export function checkSwapPolicy(policy, { nativeIn, value, sessionSpent = 0n }) 
     return { ok: false, rule: "maxPerSend", message: "native swap amount is missing." };
   }
 
-  return checkPolicy(
-    { ...policy, allowlist: null, path: policy.path },
-    { to: "0x0000000000000000000000000000000000000001", value, sessionSpent },
-  );
+  return checkAmountLimits(policy, { value, sessionSpent });
 }
 
 /** One-line summary of swap policy (amount rules only; no recipient allowlist). */

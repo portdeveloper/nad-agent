@@ -2,12 +2,11 @@
  * PuddleSwap quote + calldata — the on-chain half of the `swap` action.
  *
  * PuddleSwap is portdeveloper's Uniswap-V2 DEX on Monad testnet
- * (https://github.com/portdeveloper/puddleswap). Quotes are plain `eth_call`s
- * to the router: no API server, no key. Star routing matches the PuddleSwap
- * app (`web/src/lib/routing.ts`): the direct pair, then one- and two-hop paths
- * through the core tokens (USDC, USDT, WMON). Every path that has liquidity is
- * kept and ranked by output so the operator can pick a route; we never silently
- * replace the path they confirmed.
+ * (https://github.com/portdeveloper/puddleswap). Quotes are `eth_call`s to the
+ * router (batched through Multicall3, same as the PuddleSwap app): no API
+ * server, no key. Star routing matches `web/src/lib/routing.ts`: the direct
+ * pair, then one- and two-hop paths through USDC / USDT / WMON. The best
+ * output wins; confirm is y/N like a send.
  */
 
 import { Contract, Interface, JsonRpcProvider, getAddress as checksum } from "ethers";
@@ -23,11 +22,14 @@ export const ROUTER_ABI = [
   "function swapExactTokensForETH(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[] amounts)",
 ];
 
-/** How long the router will honour a swap after the quote, in seconds. */
+/** How long the router will honour a swap after confirm, in seconds. */
 export const SWAP_DEADLINE_SECONDS = 10 * 60;
 
-/** How many ranked routes to show in the confirm block. */
-export const MAX_DISPLAY_ROUTES = 3;
+/** Canonical Multicall3 — same address on Monad testnet and mainnet. */
+const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
+const MULTICALL3_ABI = [
+  "function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)",
+];
 
 let provider = null;
 
@@ -181,13 +183,13 @@ export function labelPath(path, ctx) {
 }
 
 /**
- * Ask the router for getAmountsOut on every candidate path. Paths with no pool
- * revert and are skipped. Ranked best-output-first. Pure eth_call — works in
- * dry-run with no key and no funds.
+ * Ask the router for getAmountsOut on every candidate path, in one Multicall3
+ * round-trip (PuddleSwap's pattern). Paths with no pool fail that subcall and
+ * are skipped. Ranked best-output-first. Falls back to parallel eth_calls if
+ * Multicall3 is unreachable.
  */
 export async function quoteRoutes(tokenIn, tokenOut, amountInRaw) {
   const dex = requireDex();
-  const router = new Contract(checksum(dex.router), ROUTER_ABI, readProvider());
   const paths = buildCandidatePaths(tokenIn.address, tokenOut.address, coreAddresses(dex));
   const ctx = {
     tokenIn,
@@ -196,32 +198,65 @@ export async function quoteRoutes(tokenIn, tokenOut, amountInRaw) {
     nativeOut: !!tokenOut.native,
     dex,
   };
+  const routerAddr = checksum(dex.router);
+  const routerIface = new Interface(ROUTER_ABI);
 
-  const results = await Promise.all(
+  const decoded = await quotePathsMulticall(routerAddr, routerIface, paths, amountInRaw)
+    ?? await quotePathsParallel(routerAddr, paths, amountInRaw);
+
+  const ranked = [];
+  for (let i = 0; i < paths.length; i++) {
+    const amountOut = decoded[i];
+    if (amountOut == null || amountOut <= 0n) continue;
+    ranked.push({
+      path: paths[i],
+      amountOut,
+      hops: paths[i].length - 1,
+      label: labelPath(paths[i], ctx),
+    });
+  }
+  ranked.sort((x, y) => (x.amountOut < y.amountOut ? 1 : x.amountOut > y.amountOut ? -1 : 0));
+  if (ranked.length === 0) {
+    throw new Error(`No ${dex.name} route with liquidity for ${tokenIn.symbol} -> ${tokenOut.symbol}.`);
+  }
+  return ranked;
+}
+
+async function quotePathsMulticall(routerAddr, routerIface, paths, amountInRaw) {
+  try {
+    const mc = new Contract(MULTICALL3, MULTICALL3_ABI, readProvider());
+    const calls = paths.map((path) => ({
+      target: routerAddr,
+      allowFailure: true,
+      callData: routerIface.encodeFunctionData("getAmountsOut", [amountInRaw, path]),
+    }));
+    const results = await mc.aggregate3.staticCall(calls);
+    return results.map((row) => {
+      if (!row.success || !row.returnData || row.returnData === "0x") return null;
+      try {
+        const [amounts] = routerIface.decodeFunctionResult("getAmountsOut", row.returnData);
+        return BigInt(amounts[amounts.length - 1]);
+      } catch {
+        return null;
+      }
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function quotePathsParallel(routerAddr, paths, amountInRaw) {
+  const router = new Contract(routerAddr, ROUTER_ABI, readProvider());
+  return Promise.all(
     paths.map(async (path) => {
       try {
         const amounts = await router.getAmountsOut(amountInRaw, path);
-        const amountOut = BigInt(amounts[amounts.length - 1]);
-        if (amountOut <= 0n) return null;
-        return {
-          path,
-          amountOut,
-          hops: path.length - 1,
-          label: labelPath(path, ctx),
-        };
+        return BigInt(amounts[amounts.length - 1]);
       } catch {
         return null;
       }
     }),
   );
-
-  const ranked = results
-    .filter(Boolean)
-    .sort((x, y) => (x.amountOut < y.amountOut ? 1 : x.amountOut > y.amountOut ? -1 : 0));
-  if (ranked.length === 0) {
-    throw new Error(`No ${dex.name} route with liquidity for ${tokenIn.symbol} -> ${tokenOut.symbol}.`);
-  }
-  return ranked;
 }
 
 /**

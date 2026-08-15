@@ -79,8 +79,7 @@ import {
   parseAccountIndex,
   needsRecipient,
   buildSwapPreview,
-  lockSwapRoute,
-  parseSwapConfirm,
+  lockBestSwap,
 } from "./tools.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
@@ -197,24 +196,6 @@ async function confirm(question) {
   return ans === "y" || ans === "yes";
 }
 
-/**
- * Swap confirm: y/yes takes the best route (index 0); a number 1..n picks that
- * listed route; anything else cancels. The chosen index is frozen — we do not
- * silently switch paths after this answer.
- */
-async function confirmSwap(routeCount) {
-  const hint = routeCount > 1 ? `[y = best / 1-${routeCount} / N]` : "[y/N]";
-  const raw = await ask(c.yellow("  confirm? ") + c.dim(hint + " "));
-  if (SCRIPTED && raw === "") {
-    println(c.red("  no answer line for the confirmation; cancelling this action."));
-    hadFailure = true;
-    return null;
-  }
-  const picked = parseSwapConfirm(raw, routeCount);
-  if (picked === null) return null;
-  return picked;
-}
-
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
 async function handleAction(action) {
   let resolved = null;
@@ -254,12 +235,11 @@ async function handleAction(action) {
         println(c.dim("  cancelled.") + "\n");
         return true;
       }
-      const picked = await confirmSwap(preview.routes.length);
-      if (picked === null) {
+      if (!(await confirm("  confirm?"))) {
         println(c.dim("  cancelled.") + "\n");
         return true;
       }
-      swapPreview = lockSwapRoute(preview, picked);
+      swapPreview = await lockBestSwap(preview);
       if (swapPreview.error) {
         println(c.red(`  Refused: ${swapPreview.error}`) + "\n");
         if (SCRIPTED) hadFailure = true;
