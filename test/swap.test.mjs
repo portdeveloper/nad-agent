@@ -9,7 +9,7 @@ import {
   ACTIONS,
   parseAction,
   parseSwapPhrase,
-  parseSwapConfirm,
+  mergeFreshQuote,
   isWrite,
   needsRecipient,
   describeAction,
@@ -21,7 +21,6 @@ import {
   buildCandidatePaths,
   buildSwapCalls,
   isWrapPair,
-  MAX_DISPLAY_ROUTES,
   ROUTER_ABI,
   SWAP_DEADLINE_SECONDS,
 } from "../src/swap.mjs";
@@ -144,9 +143,6 @@ describe("buildCandidatePaths — star routing", () => {
       }
     }
   });
-  it("caps displayed routes at MAX_DISPLAY_ROUTES", () => {
-    assert.equal(MAX_DISPLAY_ROUTES, 3);
-  });
 });
 
 describe("isWrapPair", () => {
@@ -163,24 +159,36 @@ describe("isWrapPair", () => {
   });
 });
 
-describe("parseSwapConfirm", () => {
-  it("y and yes select the best route (index 0)", () => {
-    assert.equal(parseSwapConfirm("y", 3), 0);
-    assert.equal(parseSwapConfirm("YES", 3), 0);
+describe("mergeFreshQuote — confirm-click re-quote", () => {
+  const shown = { path: [WMON, USDC], amountOut: 1000n, minOut: 990n, label: "WMON -> USDC", hops: 1, index: 0 };
+
+  it("keeps the snapshot if the re-quote failed", () => {
+    const r = mergeFreshQuote(shown, null, 1);
+    assert.equal(r.ok, true);
+    assert.equal(r.quote, shown);
   });
-  it("a listed number selects that route", () => {
-    assert.equal(parseSwapConfirm("1", 3), 0);
-    assert.equal(parseSwapConfirm("2", 3), 1);
-    assert.equal(parseSwapConfirm("3", 3), 2);
+
+  it("raises the min-out floor when the fresh quote is better", () => {
+    const fresh = { path: [WMON, USDC], amountOut: 2000n, hops: 1, label: "WMON -> USDC" };
+    const r = mergeFreshQuote(shown, fresh, 1);
+    assert.equal(r.ok, true);
+    assert.equal(r.quote.amountOut, 2000n);
+    assert.equal(r.quote.minOut, applySlippage(2000n, 1));
   });
-  it("rejects trailing garbage that parseInt would accept", () => {
-    assert.equal(parseSwapConfirm("1junk", 3), null);
+
+  it("keeps the shown min-out if the fresh quote is only slightly worse but still above it", () => {
+    const fresh = { path: [WMON, USDT, USDC], amountOut: 995n, hops: 2, label: "WMON -> USDT -> USDC" };
+    const r = mergeFreshQuote(shown, fresh, 1);
+    assert.equal(r.ok, true);
+    assert.equal(r.quote.minOut, 990n);
+    assert.equal(r.quote.label, "WMON -> USDT -> USDC");
   });
-  it("rejects a leading zero, empty input, and an out-of-range number", () => {
-    assert.equal(parseSwapConfirm("01", 3), null);
-    assert.equal(parseSwapConfirm("", 3), null);
-    assert.equal(parseSwapConfirm("2", 1), null);
-    assert.equal(parseSwapConfirm("n", 3), null);
+
+  it("refuses when output falls below the min-out that was shown", () => {
+    const fresh = { path: [WMON, USDC], amountOut: 980n, hops: 1, label: "WMON -> USDC" };
+    const r = mergeFreshQuote(shown, fresh, 1);
+    assert.equal(r.ok, false);
+    assert.match(r.error, /min-out/);
   });
 });
 

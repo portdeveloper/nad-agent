@@ -63,9 +63,9 @@ else if (gasOverride === "native") gasMode = "native";
 else gasMode = "sponsored";
 
 // Slippage tolerance for swaps, in percent. Clamped to (0, 50]; a nonsense
-// value falls back to 0.5%. Override with SWAP_SLIPPAGE_PERCENT in .env.
-const rawSlippage = Number(process.env.SWAP_SLIPPAGE_PERCENT || 0.5);
-const slippagePercent = rawSlippage > 0 && rawSlippage <= 50 ? rawSlippage : 0.5;
+// value falls back to 1% (PuddleSwap's default). Override with SWAP_SLIPPAGE_PERCENT.
+const rawSlippage = Number(process.env.SWAP_SLIPPAGE_PERCENT || 1);
+const slippagePercent = rawSlippage > 0 && rawSlippage <= 50 ? rawSlippage : 1;
 
 const _home = homedir();
 if (!_home) throw new Error("Cannot determine home directory — set HOME env var");

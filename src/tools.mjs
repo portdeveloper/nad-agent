@@ -15,7 +15,6 @@ import { resolveRecipient, formatRecipient, safeEcho } from "./addressBook.mjs";
 import { checkPolicy, checkSwapPolicy, describePolicy, describeSwapPolicy } from "./policy.mjs";
 import {
   SWAP_DEADLINE_SECONDS,
-  MAX_DISPLAY_ROUTES,
   requireDex,
   resolveSwapToken,
   isWrapPair,
@@ -162,20 +161,6 @@ export function parseSwapPhrase(text) {
   const m = String(text ?? "").match(re);
   if (!m) return null;
   return { action: "swap", amountIn: m[1], tokenIn: m[2], tokenOut: m[3] };
-}
-
-/**
- * Swap confirm: `y`/`yes` takes the best route (index 0). A whole-string decimal
- * `1..routeCount` picks that listed route. Anything else (including `1junk`)
- * cancels — `parseInt` is not used because it would accept trailing garbage.
- */
-export function parseSwapConfirm(raw, routeCount) {
-  const ans = String(raw ?? "").trim().toLowerCase();
-  if (ans === "y" || ans === "yes") return 0;
-  if (!/^[1-9]\d*$/.test(ans)) return null;
-  const n = Number(ans);
-  if (n >= 1 && n <= routeCount) return n - 1;
-  return null;
 }
 
 /**
@@ -353,12 +338,13 @@ function gasLabel() {
 }
 
 /**
- * Quote every liquid PuddleSwap path and lay out the ranked routes for confirm.
- * The quote is a live eth_call, so numbers are real even in dry-run.
+ * Quote every liquid PuddleSwap path, auto-pick the best output (same as the
+ * PuddleSwap UI), and lay out one confirm block. The quote is a live eth_call,
+ * so numbers are real even in dry-run.
  * Returns { error } or { block, routes, tokenIn, tokenOut, amountInRaw, amountIn,
  *   nativeIn, nativeOut, needsApproval, slippage }.
- * Does not lock a route — the caller picks one with lockSwapRoute() so the
- * path on screen is the path that gets signed.
+ * lockBestSwap() freezes the best path after y — a silent re-quote at confirm
+ * refuses if output fell below the min-out that was shown.
  */
 export async function buildSwapPreview(a, { policy = null, sessionSpent = 0n } = {}) {
   let dex;
@@ -441,35 +427,23 @@ export async function buildSwapPreview(a, { policy = null, sessionSpent = 0n } =
     /* best-effort */
   }
 
-  const shown = ranked.slice(0, MAX_DISPLAY_ROUTES).map((r, i) => {
-    const minOut = applySlippage(r.amountOut, slippage);
-    return {
-      ...r,
-      minOut,
-      index: i,
-    };
-  });
-  if (shown.some((r) => r.minOut <= 0n)) {
+  const best = ranked[0];
+  const minOut = applySlippage(best.amountOut, slippage);
+  if (minOut <= 0n) {
     return { error: "quoted output is too small to set a min-out bound." };
   }
-
-  const routeLines = shown.map((r, i) => {
-    const tag = i === 0 ? "  (best)" : "";
-    const out = formatTokenUnits(r.amountOut, tokenOut.decimals);
-    return `  ${i + 1}) ${r.label}   ~${out} ${tokenOut.symbol}${tag}`;
-  });
+  const shown = [{ ...best, minOut, index: 0 }];
 
   const lines = [
     `SWAP on ${dex.name}${gasSuffix()}`,
     `pay:          ${a.amountIn} ${tokenIn.symbol}`,
-    `receive:      ~${formatTokenUnits(shown[0].amountOut, tokenOut.decimals)} ${tokenOut.symbol}  (best route, quoted now)`,
-    `min received: ${formatTokenUnits(shown[0].minOut, tokenOut.decimals)} ${tokenOut.symbol}  (reverts below this)`,
+    `receive:      ~${formatTokenUnits(best.amountOut, tokenOut.decimals)} ${tokenOut.symbol}`,
+    `min received: ${formatTokenUnits(minOut, tokenOut.decimals)} ${tokenOut.symbol}  (reverts below this)`,
     `slippage:     ${slippage}%`,
-    `routes:       ${shown.length} of ${ranked.length} with liquidity  — pick 1–${shown.length}, or y for best`,
-    ...routeLines,
+    `route:        ${best.label}` + (ranked.length > 1 ? `  (${ranked.length} paths quoted, best wins)` : ""),
     ...(allowanceLine ? [allowanceLine] : []),
     ...(balanceLine ? [balanceLine] : []),
-    `deadline:     ${SWAP_DEADLINE_SECONDS / 60} minutes from now`,
+    `deadline:     ${SWAP_DEADLINE_SECONDS / 60} minutes after confirm`,
     `router:       ${dex.router}`,
     `gas:          ${gasLabel()}`,
   ];
@@ -504,8 +478,49 @@ function checksumEq(a, b) {
 }
 
 /**
- * Freeze one ranked route into the calls that will be signed. The operator
- * confirmed this path; we do not re-quote or silently switch to another hop.
+ * At confirm: re-quote (auto-best). Keep the shown min-out as a floor so the
+ * fill cannot be worse than what was approved. If the fresh output is below
+ * that floor, refuse — cancel and /swap again. If the re-quote RPC fails, sign
+ * the snapshot that was shown.
+ */
+export function mergeFreshQuote(shown, fresh, slippage) {
+  if (!shown) return { ok: false, error: "no route to lock." };
+  if (!fresh) return { ok: true, quote: shown };
+  const minOut = applySlippage(fresh.amountOut, slippage);
+  if (minOut <= 0n) return { ok: false, error: "quoted output is too small to set a min-out bound." };
+  if (fresh.amountOut < shown.minOut) {
+    return {
+      ok: false,
+      error: "quote moved below the min-out you were shown. Cancel and /swap again.",
+    };
+  }
+  const floor = shown.minOut > minOut ? shown.minOut : minOut;
+  return { ok: true, quote: { ...fresh, minOut: floor, index: 0 } };
+}
+
+/**
+ * Freeze the best route into the calls that will be signed. Re-quotes once at
+ * confirm (Uniswap/CowSwap "fresh quote before sign"); does not keep ticking.
+ */
+export async function lockBestSwap(preview) {
+  if (preview?.error) return preview;
+  const shown = preview.routes?.[0];
+  if (!shown) return { error: "no route to lock." };
+  let fresh = null;
+  try {
+    const ranked = await quoteRoutes(preview.tokenIn, preview.tokenOut, preview.amountInRaw);
+    fresh = ranked[0] ?? null;
+  } catch {
+    fresh = null;
+  }
+  const merged = mergeFreshQuote(shown, fresh, preview.slippage);
+  if (!merged.ok) return { error: merged.error };
+  return lockSwapRoute({ ...preview, routes: [merged.quote] }, 0);
+}
+
+/**
+ * Freeze one ranked route into the calls that will be signed. After this, the
+ * path + min-out do not change.
  */
 export function lockSwapRoute(preview, routeIndex = 0) {
   if (preview?.error) return preview;
