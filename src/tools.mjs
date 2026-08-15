@@ -11,7 +11,7 @@ import * as wallet from "./wallet.mjs";
 import { config } from "./config.mjs";
 import { parseMon, formatMon, formatTokenUnits, parseTokenAmount, isAddress } from "./format.mjs";
 import { listKnownTokenSymbols, resolveToken } from "./tokens.mjs";
-import { resolveRecipient, formatRecipient } from "./addressBook.mjs";
+import { resolveRecipient, formatRecipient, safeEcho } from "./addressBook.mjs";
 import { checkPolicy, describePolicy } from "./policy.mjs";
 
 export const ACTIONS = {
@@ -119,7 +119,13 @@ export function resolveSend(a, { policy = null, sessionSpent = 0n } = {}) {
     try {
       value = parseMon(a.amountMon);
     } catch {
-      return { ok: false, reason: `invalid amount: "${a.amountMon}" is not a valid MON value` };
+      // safeEcho: the amount comes from model output or script args, and a refusal
+      // must not hand raw bytes to the terminal — same rule as recipient refusals.
+      return { ok: false, reason: `invalid amount: "${safeEcho(a.amountMon)}" is not a valid MON value` };
+    }
+    // parseEther happily returns negative and zero bigints; neither is a send.
+    if (value <= 0n) {
+      return { ok: false, reason: `invalid amount: "${safeEcho(a.amountMon)}" — a send must be greater than zero` };
     }
   }
   const verdict = checkPolicy(policy, { to: r.address, value, sessionSpent });

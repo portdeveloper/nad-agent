@@ -258,6 +258,17 @@ async function handleSlash(line) {
         ? handleAction({ action: "get_token_balance", token: rest.join(" ") })
         : handleAction({ action: "get_balance" });
     case "send":
+      // Wrong arity gets the usage line, not a confusing refusal about
+      // "undefined" being a bad address. Scripted mode still counts it as a
+      // failure: a malformed /send in a script is a script bug, and the old
+      // refusal path set the exit code too.
+      if (rest.length !== 2) {
+        // println, not console.log: the refusal this replaces went through the
+        // same surface, and in scripted mode stdout must stay machine-clean.
+        println(c.dim("  usage: /send <to> <mon>") + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
       return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
     case "config":
       statusBlock();
