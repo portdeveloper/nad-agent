@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { config, describeConfig } from "./config.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
-import { systemPrompt, parseAction, runAction, resolveSend, buildSwapPreview, lockSwapRoute } from "./tools.mjs";
+import { systemPrompt, parseAction, runAction, resolveSend, buildSwapPreview, lockBestSwap } from "./tools.mjs";
 
 const TEST_ADDR = "0x000000000000000000000000000000000000dEaD";
 const log = (s = "") => console.log(s);
@@ -74,7 +74,7 @@ log("\nswap quote + dry-run (PuddleSwap):");
   if (preview.error) throw new Error("swap preview failed: " + preview.error);
   if (!preview.routes?.length) throw new Error("swap preview returned no routes");
   log(indent(preview.block));
-  const locked = lockSwapRoute(preview, 0);
+  const locked = await lockBestSwap(preview);
   if (locked.error) throw new Error(locked.error);
   const swapped = await runAction(swap, null, { preview: locked });
   if (typeof swapped === "string" && swapped.startsWith("Refused:")) throw new Error(swapped);
