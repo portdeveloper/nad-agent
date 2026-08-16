@@ -25,8 +25,10 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 - **`what's my address?`** → the agent's smart-account address
 - **`what's my balance?`** → live MON balance, read from Monad
 - **`what's my USDC balance?`** → ERC-20 balance read by known testnet symbol or token address
+- **`what NFTs do I own?`** → ERC-721 list for the wallet, read from the Reservoir indexer (set `RESERVOIR_API_KEY`)
 - **`send 0.1 MON to 0x…`** → asks you to confirm, then broadcasts a **gasless** transfer (the wallet pays 0 gas) and returns the on-chain tx hash + explorer link
 - **`send 0.1 MON to alice`** → resolves the name through your local address book and shows the address it resolved to *before* you confirm
+- **`send NFT #12 to alice`** → ownership-checked ERC-721 `safeTransferFrom`, gasless (or dry-run)
 - anything else → the local model just replies in words
 
 It all runs **on-device**: the model never calls the cloud, and the wallet key never leaves the machine.
@@ -63,7 +65,7 @@ agent at startup instead of being ignored.
 
 ---
 
-**Scope (v0):** native MON sends plus read-only ERC-20 balance checks — `get_address`, `get_balance`, `get_token_balance`, `send`. No ERC-20 transfers, swaps, bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
+**Scope (v0):** native MON + ERC-20 sends, read-only ERC-20 balance checks, and ERC-721 NFT reads/transfers — `get_address`, `get_balance`, `get_token_balance`, `get_nfts`, `send`, `send_token`, `transfer_nft`. No swaps, bridges, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
 
 ---
 
