@@ -21,14 +21,22 @@ export const ACTIONS = {
     args: ["token"],
     desc: "Show an ERC-20 token balance by token symbol or contract address.",
   },
+  get_nfts: {
+    args: ["address"],
+    desc: "Show the ERC-721 NFTs owned by the agent's wallet (or by the given 0x address, if provided).",
+  },
   send_mon: { args: ["to", "amountMon"], desc: "Send native MON to `to` — a 0x address or an address-book name — amount in MON as a string." },
   send_token: {
     args: ["token", "to", "amount"],
     desc: "Send an ERC-20 token to `to` — a 0x address or an address-book name. `token` is a symbol (e.g. USDC) or contract address. `amount` is a human-readable string.",
   },
-  account: {
+account: {
     args: ["index"],
     desc: "List derived accounts (no args) or switch to account `index` (BIP-44).",
+  },
+  transfer_nft: {
+    args: ["to", "contractAddress", "tokenId"],
+    desc: "Send an ERC-721 NFT to `to` — a 0x address or an address-book name. `contractAddress` is the NFT contract address, `tokenId` the token id as a string. Sends from the agent's own wallet unless `fromAddress` is given.",
   },
   none: { args: [], desc: "The message is not an on-chain request; just reply in words." },
 };
@@ -37,6 +45,12 @@ const SYMBOL = () => config.chain.symbol;
 const isNativeToken = (token) => String(token ?? "").trim().toUpperCase() === SYMBOL();
 const ADDRESS_RE = /\b0x[0-9a-fA-F]{40}\b/;
 const looksLikeBalanceQuestion = (text) => /\b(balance|bal|holding|holdings)\b/i.test(text);
+const looksLikeNftQuestion = (text) => {
+  // Ownership language only — and never when the text is asking to move something,
+  // so "send my NFT to alice" does not silently become a read.
+  if (/\b(send|transfer|move)\b/i.test(text)) return false;
+  return /\b(nfts?)\b/i.test(text) && /\b(my|i own|owned|holdings?|in my wallet)\b/i.test(text);
+};
 
 function parseTokenBalancePhrase(text) {
   if (!looksLikeBalanceQuestion(text)) return null;
@@ -110,7 +124,9 @@ export function parseAction(text) {
   const tokenBalancePhrase = parseTokenBalancePhrase(text);
   if (tokenBalancePhrase) return tokenBalancePhrase;
 
-  for (const name of ["get_balance", "get_address"]) {
+  if (looksLikeNftQuestion(text)) return { action: "get_nfts" };
+
+  for (const name of ["get_balance", "get_address", "get_nfts"]) {
     if (new RegExp(`\\b${name}\\b`).test(text)) return { action: name };
   }
   return { action: "none" };
@@ -124,7 +140,9 @@ export function parseAction(text) {
  */
 export function resolveSend(a, { policy = null, sessionSpent = 0n } = {}) {
   if (!isWrite(a.action)) return { ok: true, recipient: null };
-  const r = resolveRecipient(a.to);
+  // transfer_nft names its recipient `toAddress` in the model contract; `to` stays the
+  // field for sends, so accept either (same alias rule as token/tokenAddress).
+  const r = resolveRecipient(a.to ?? a.toAddress);
   if (!r.ok) return { ok: false, reason: r.reason };
   // The spend policy is checked here, on the resolved address, so every write
   // action passes through it: the allowlist binds token transfers as well as
@@ -151,7 +169,7 @@ export function resolveSend(a, { policy = null, sessionSpent = 0n } = {}) {
 
 /** True if the action mutates chain state and should require confirmation. */
 export function isWrite(action) {
-  return action === "send_mon" || action === "send_token";
+  return action === "send_mon" || action === "send_token" || action === "transfer_nft";
 }
 
 /** Parse an account index from model output or CLI input.
@@ -183,13 +201,15 @@ export function describeAction(a, resolved) {
       return "Read: your MON balance";
     case "get_token_balance":
       return `Read: your ${a.token ?? a.symbol ?? a.tokenAddress ?? "token"} token balance`;
-    case "account": {
+case "account": {
       const i = parseAccountIndex(a.index);
       if (i !== null) {
         return `Switch to account #${i}`;
       }
       return "Read: list derived accounts";
     }
+    case "get_nfts":
+      return "Read: your ERC-721 NFTs";
     case "send_mon": {
       // `resolved` is a separate argument, never a field on `a`: `a` is built from model
       // output. There is deliberately no fallback that resolves here — a second resolution
@@ -205,6 +225,15 @@ export function describeAction(a, resolved) {
       const label = a.tokenSymbol || a.token || "token";
       const dest = resolved?.ok ? formatRecipient(resolved) : "[recipient not resolved]";
       return `Send ${a.amount} ${label} -> ${dest}` +
+        (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
+    }
+    case "transfer_nft": {
+      // Same recipient rule as the sends above: show what was resolved, never the raw model
+      // output. isWrite() covers transfer_nft, so resolveSend() has already run.
+      const contract = a.contractAddress ?? a.contract ?? "unknown contract";
+      const dest = resolved?.ok ? formatRecipient(resolved) : "[recipient not resolved]";
+      const from = a.fromAddress ? ` (from ${a.fromAddress})` : "";
+      return `Send NFT #${a.tokenId} (${contract}) -> ${dest}${from}` +
         (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
     }
     default:
@@ -364,6 +393,50 @@ export async function runAction(a, resolved) {
         `Submitted ${a.amountMon} ${SYMBOL()} to ${shown} (gasless UserOp)\n` +
         `  userOp: ${res.userOpHash}\n` +
         `  (not confirmed on-chain yet — should land shortly; re-check /balance)`
+      );
+    }
+
+    case "get_nfts": {
+      const owner = a.address ?? a.owner;
+      if (owner && !isAddress(owner)) {
+        return `Refused: "${String(owner).trim()}" is not a valid address.`;
+      }
+      const nfts = await wallet.getNfts(owner);
+      if (!nfts.length) return "No ERC-721 NFTs found.";
+      return nfts
+        .map((n) => `${n.name ?? `#${n.tokenId}`} (tokenId ${n.tokenId})\n  contract: ${n.contract}`)
+        .join("\n");
+    }
+
+    case "transfer_nft": {
+      // `to` is the address resolveSend() produced and the boundary above validated — same
+      // rule as send_mon/send_token. `contractAddress`/`tokenId` come from model output.
+      const contract = a.contractAddress ?? a.contract ?? "";
+      if (!contract) return "Refused: no NFT contract address given.";
+      if (a.tokenId === undefined || a.tokenId === null || String(a.tokenId).trim() === "") {
+        return "Refused: no tokenId given.";
+      }
+      const res = await wallet.transferNft(to, contract, String(a.tokenId), a.fromAddress);
+      const label = `#${a.tokenId} (${contract})`;
+
+      if (res.dryRun) {
+        return (
+          `DRY RUN — would send NFT ${label} to ${shown}\n` +
+          `  (est. fee ${formatMon(res.fee)} ${SYMBOL()}). Set PIMLICO_API_KEY in .env to broadcast for real.`
+        );
+      }
+      if (res.hash) {
+        const url = `${config.chain.explorerUrl}/tx/${res.hash}`;
+        return (
+          `Sent NFT ${label} to ${shown}\n` +
+          `  tx:     ${res.hash}\n  ${url}\n` +
+          `  userOp: ${res.userOpHash}`
+        );
+      }
+      return (
+        `Submitted NFT ${label} to ${shown} (gasless UserOp)\n` +
+        `  userOp: ${res.userOpHash}\n` +
+        `  (not confirmed on-chain yet — should land shortly; re-check your NFTs)`
       );
     }
 
