@@ -16,7 +16,7 @@ import { isAddress } from "./format.mjs";
 import { resolveToken } from "./tokens.mjs";
 import * as wallet from "./wallet.mjs";
 
-const ROUTER_ABI = [
+export const ROUTER_ABI = [
   "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)",
   "function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[] amounts)",
   "function swapExactETHForTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline) payable returns (uint256[] amounts)",

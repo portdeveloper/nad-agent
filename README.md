@@ -107,6 +107,9 @@ silently replaced. Slippage defaults to 0.5% (`SWAP_SLIPPAGE_PERCENT`). Mainnet 
 
 `/swap 0.1 MON USDC` skips the model. Native MON in/out is supported; MON ↔ WMON is a wrap, not a
 swap, and is refused. ERC-20 approve is an exact amount, batched with the swap into one UserOp.
+A configured spend policy applies `maxPerSend` / `maxPerSession` to native-MON swaps and refuses
+an ERC-20-input swap when those MON limits are set (the wallet will not skip a rule it cannot
+evaluate). The recipient allowlist does not apply: swap output returns to the agent's own Safe.
 
 ---
 

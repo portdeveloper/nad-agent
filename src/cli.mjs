@@ -80,6 +80,7 @@ import {
   needsRecipient,
   buildSwapPreview,
   lockSwapRoute,
+  parseSwapConfirm,
 } from "./tools.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
@@ -209,11 +210,9 @@ async function confirmSwap(routeCount) {
     hadFailure = true;
     return null;
   }
-  const ans = raw.toLowerCase();
-  if (ans === "y" || ans === "yes") return 0;
-  const n = Number.parseInt(raw, 10);
-  if (Number.isInteger(n) && n >= 1 && n <= routeCount) return n - 1;
-  return null;
+  const picked = parseSwapConfirm(raw, routeCount);
+  if (picked === null) return null;
+  return picked;
 }
 
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
@@ -239,7 +238,7 @@ async function handleAction(action) {
     if (action.action === "swap") {
       let preview;
       try {
-        preview = await buildSwapPreview(action);
+        preview = await buildSwapPreview(action, { policy, sessionSpent });
       } catch (err) {
         println(c.red(`  Refused: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;
@@ -329,6 +328,9 @@ async function handleAction(action) {
     // the budget bounds what the agent attempts, not only what settles.
     if (action.action === "send_mon" && resolved && !String(out ?? "").startsWith("Refused:")) {
       sessionSpent += parseMon(action.amountMon);
+    }
+    if (action.action === "swap" && swapPreview?.nativeIn && !String(out ?? "").startsWith("Refused:")) {
+      sessionSpent += parseMon(action.amountIn);
     }
     if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
   } catch (err) {

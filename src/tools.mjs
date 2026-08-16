@@ -12,7 +12,7 @@ import { config } from "./config.mjs";
 import { parseMon, formatMon, formatTokenUnits, parseTokenAmount, isAddress } from "./format.mjs";
 import { listKnownTokenSymbols, resolveToken } from "./tokens.mjs";
 import { resolveRecipient, formatRecipient, safeEcho } from "./addressBook.mjs";
-import { checkPolicy, describePolicy } from "./policy.mjs";
+import { checkPolicy, checkSwapPolicy, describePolicy, describeSwapPolicy } from "./policy.mjs";
 import {
   SWAP_DEADLINE_SECONDS,
   MAX_DISPLAY_ROUTES,
@@ -165,6 +165,20 @@ export function parseSwapPhrase(text) {
 }
 
 /**
+ * Swap confirm: `y`/`yes` takes the best route (index 0). A whole-string decimal
+ * `1..routeCount` picks that listed route. Anything else (including `1junk`)
+ * cancels — `parseInt` is not used because it would accept trailing garbage.
+ */
+export function parseSwapConfirm(raw, routeCount) {
+  const ans = String(raw ?? "").trim().toLowerCase();
+  if (ans === "y" || ans === "yes") return 0;
+  if (!/^[1-9]\d*$/.test(ans)) return null;
+  const n = Number(ans);
+  if (n >= 1 && n <= routeCount) return n - 1;
+  return null;
+}
+
+/**
  * Resolve a send's recipient ONCE, before anything is shown or signed.
  *
  * Callers refuse before prompting: asking someone to confirm a transfer that is already
@@ -174,10 +188,11 @@ export function resolveSend(a, { policy = null, sessionSpent = 0n } = {}) {
   if (!needsRecipient(a.action)) return { ok: true, recipient: null };
   const r = resolveRecipient(a.to);
   if (!r.ok) return { ok: false, reason: r.reason };
-  // The spend policy is checked here, on the resolved address, so every write
-  // action passes through it: the allowlist binds token transfers as well as
-  // native sends, while the MON amount limits only apply to amounts actually
+  // The spend policy is checked here, on the resolved address, so every send
+  // passes through it: the allowlist binds token transfers as well as native
+  // sends, while the MON amount limits only apply to amounts actually
   // denominated in MON (a token amount arrives as null and skips them).
+  // Swaps are not sends — they use checkSwapPolicy() instead.
   let value = null;
   if (a.action === "send_mon") {
     try {
@@ -345,7 +360,7 @@ function gasLabel() {
  * Does not lock a route — the caller picks one with lockSwapRoute() so the
  * path on screen is the path that gets signed.
  */
-export async function buildSwapPreview(a) {
+export async function buildSwapPreview(a, { policy = null, sessionSpent = 0n } = {}) {
   let dex;
   try {
     dex = requireDex();
@@ -378,6 +393,17 @@ export async function buildSwapPreview(a) {
     return { error: `"${a.amountIn}" is not a valid ${tokenIn.symbol} amount.` };
   }
 
+  const nativeIn = !!tokenIn.native;
+  const nativeOut = !!tokenOut.native;
+  const verdict = checkSwapPolicy(policy, {
+    nativeIn,
+    value: nativeIn ? amountInRaw : null,
+    sessionSpent,
+  });
+  if (!verdict.ok) {
+    return { error: `policy ${verdict.rule}: ${verdict.message}` };
+  }
+
   let ranked;
   try {
     ranked = await quoteRoutes(tokenIn, tokenOut, amountInRaw);
@@ -388,9 +414,6 @@ export async function buildSwapPreview(a) {
   const slippage = config.slippagePercent;
   const owner = wallet.getAddress();
   if (!owner) return { error: "wallet is not initialized (set WDK_SEED in .env)." };
-
-  const nativeIn = !!tokenIn.native;
-  const nativeOut = !!tokenOut.native;
 
   let needsApproval = false;
   let allowanceLine = null;
@@ -450,6 +473,12 @@ export async function buildSwapPreview(a) {
     `router:       ${dex.router}`,
     `gas:          ${gasLabel()}`,
   ];
+  const policyNote = describeSwapPolicy(policy, {
+    nativeIn,
+    value: nativeIn ? amountInRaw : 0n,
+    sessionSpent,
+  });
+  if (policyNote) lines.push(`Policy:       ${policyNote}`);
   if (insufficient) {
     lines.push(`WARNING:      balance is below the amount — this swap would revert.`);
   }

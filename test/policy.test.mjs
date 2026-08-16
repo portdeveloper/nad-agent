@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPolicy, checkPolicy, hasRules, describePolicy } from "../src/policy.mjs";
+import { loadPolicy, checkPolicy, checkSwapPolicy, hasRules, describePolicy, describeSwapPolicy } from "../src/policy.mjs";
 import { resolveSend } from "../src/tools.mjs";
 import { parseMon } from "../src/format.mjs";
 
@@ -154,5 +154,77 @@ describe("resolveSend enforces the policy on every write action", () => {
     const r = resolveSend({ action: "send_mon", to: BOB, amountMon: "nope" });
     assert.equal(r.ok, false);
     assert.match(r.reason, /invalid amount/);
+  });
+
+  test("swap is not a send: resolveSend does not apply the allowlist or require `to`", () => {
+    const r = resolveSend(
+      { action: "swap", amountIn: "1", tokenIn: "MON", tokenOut: "USDC" },
+      { policy: rules },
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.recipient, null);
+  });
+});
+
+describe("checkSwapPolicy", () => {
+  const amountRules = loadPolicy(policyFile({ maxPerSend: "0.5", maxPerSession: "1" }));
+  const allowOnly = loadPolicy(policyFile({ allowlist: [ALICE] }));
+  const both = loadPolicy(policyFile({ maxPerSend: "0.5", allowlist: [ALICE] }));
+
+  test("no policy allows every swap", () => {
+    assert.equal(checkSwapPolicy(null, { nativeIn: true, value: parseMon("100") }).ok, true);
+    assert.equal(checkSwapPolicy(null, { nativeIn: false, value: null }).ok, true);
+  });
+
+  test("enforces maxPerSend on a native MON swap", () => {
+    const ok = checkSwapPolicy(amountRules, { nativeIn: true, value: parseMon("0.4") });
+    const bad = checkSwapPolicy(amountRules, { nativeIn: true, value: parseMon("0.6") });
+    assert.equal(ok.ok, true);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.rule, "maxPerSend");
+  });
+
+  test("enforces maxPerSession on a native MON swap", () => {
+    const v = checkSwapPolicy(amountRules, {
+      nativeIn: true,
+      value: parseMon("0.4"),
+      sessionSpent: parseMon("0.8"),
+    });
+    assert.equal(v.ok, false);
+    assert.equal(v.rule, "maxPerSession");
+  });
+
+  test("refuses an ERC-20-input swap when MON amount limits are configured", () => {
+    const v = checkSwapPolicy(amountRules, { nativeIn: false, value: null });
+    assert.equal(v.ok, false);
+    assert.equal(v.rule, "maxPerSend");
+    assert.match(v.message, /cannot be evaluated/);
+  });
+
+  test("allowlist-only policy does not block a swap (no third-party recipient)", () => {
+    assert.equal(checkSwapPolicy(allowOnly, { nativeIn: true, value: parseMon("9") }).ok, true);
+    assert.equal(checkSwapPolicy(allowOnly, { nativeIn: false, value: null }).ok, true);
+  });
+
+  test("allowlist plus MON limits still enforces the amount on a native swap", () => {
+    const v = checkSwapPolicy(both, { nativeIn: true, value: parseMon("0.9") });
+    assert.equal(v.ok, false);
+    assert.equal(v.rule, "maxPerSend");
+  });
+});
+
+describe("describeSwapPolicy", () => {
+  test("is silent without amount rules", () => {
+    assert.equal(describeSwapPolicy(null, { nativeIn: true, value: parseMon("1") }), null);
+    const allowOnly = loadPolicy(policyFile({ allowlist: [ALICE] }));
+    assert.equal(describeSwapPolicy(allowOnly, { nativeIn: true, value: parseMon("1") }), null);
+  });
+
+  test("reports the session budget on a native swap", () => {
+    const p = loadPolicy(policyFile({ maxPerSession: "10" }));
+    assert.equal(
+      describeSwapPolicy(p, { nativeIn: true, value: parseMon("2.5"), sessionSpent: 0n }),
+      "2.5 of 10.0 MON session budget",
+    );
   });
 });
