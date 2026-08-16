@@ -308,14 +308,18 @@ export async function sendCalls(calls) {
     throw new Error("No calls to send");
   }
   if (config.gasMode === "dry-run") {
-    let fee = 0n;
     try {
       const q = await account.quoteSendTransaction(calls);
-      fee = BigInt(q?.fee ?? 0);
-    } catch {
-      /* estimation may need a bundler; ignore in dry-run */
+      return { dryRun: true, calls, fee: BigInt(q?.fee ?? 0), simulated: true };
+    } catch (err) {
+      const msg = String(err?.shortMessage || err?.info?.error?.message || err?.message || err);
+      // Reverts and bad calldata must not look like a successful dry-run.
+      // A missing bundler / network blip is not a simulation of the calls.
+      if (/revert|call exception|AA2\d|UserOperation|invalid opcode|execution reverted/i.test(msg)) {
+        throw new Error(`dry-run simulation rejected the calls: ${msg}`);
+      }
+      return { dryRun: true, calls, fee: 0n, simulated: false };
     }
-    return { dryRun: true, calls, fee };
   }
   const res = await account.sendTransaction(calls);
   const userOpHash = res.hash;

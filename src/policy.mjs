@@ -129,6 +129,45 @@ export function checkPolicy(policy, { to, value, sessionSpent = 0n }) {
   return { ok: true };
 }
 
+/**
+ * Spend policy for swaps. Swaps have no third-party recipient, so the allowlist
+ * does not apply (output always returns to the agent's own Safe). MON amount
+ * limits apply when the input is native MON. If those limits are configured and
+ * the input is not MON, refuse rather than silently skipping a rule we cannot
+ * evaluate.
+ */
+export function checkSwapPolicy(policy, { nativeIn, value, sessionSpent = 0n }) {
+  if (!hasRules(policy)) return { ok: true };
+  const amountRules = policy.maxPerSend != null || policy.maxPerSession != null;
+  if (!amountRules) return { ok: true };
+
+  if (!nativeIn) {
+    const rule = policy.maxPerSend != null ? "maxPerSend" : "maxPerSession";
+    return {
+      ok: false,
+      rule,
+      message: "swap input is not MON, so the policy MON limits cannot be evaluated.",
+    };
+  }
+
+  if (value == null) {
+    return { ok: false, rule: "maxPerSend", message: "native swap amount is missing." };
+  }
+
+  return checkPolicy(
+    { ...policy, allowlist: null, path: policy.path },
+    { to: "0x0000000000000000000000000000000000000001", value, sessionSpent },
+  );
+}
+
+/** One-line summary of swap policy (amount rules only; no recipient allowlist). */
+export function describeSwapPolicy(policy, { nativeIn, value, sessionSpent = 0n }) {
+  if (!hasRules(policy)) return null;
+  if (!nativeIn) return null;
+  if (policy.maxPerSend == null && policy.maxPerSession == null) return null;
+  return describePolicy({ ...policy, allowlist: null, path: policy.path }, { value, sessionSpent });
+}
+
 /** One-line summary of what applied, shown in the confirmation block. */
 export function describePolicy(policy, { value, sessionSpent = 0n }) {
   if (!hasRules(policy)) return null;

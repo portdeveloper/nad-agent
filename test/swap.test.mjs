@@ -9,6 +9,7 @@ import {
   ACTIONS,
   parseAction,
   parseSwapPhrase,
+  parseSwapConfirm,
   isWrite,
   needsRecipient,
   describeAction,
@@ -18,9 +19,13 @@ import { config } from "../src/config.mjs";
 import {
   applySlippage,
   buildCandidatePaths,
+  buildSwapCalls,
   isWrapPair,
   MAX_DISPLAY_ROUTES,
+  ROUTER_ABI,
+  SWAP_DEADLINE_SECONDS,
 } from "../src/swap.mjs";
+import { Interface, getAddress } from "ethers";
 
 const USDC = "0x534b2f3A21130d7a60830c2Df862319e593943A3";
 const WMON = "0x97B3070F9Da6C002343862b35E68Bd8e22608943";
@@ -155,5 +160,137 @@ describe("isWrapPair", () => {
     const usdc = { symbol: "USDC", address: USDC, native: false };
     const wmon = { symbol: "WMON", address: WMON, native: false };
     assert.equal(isWrapPair(usdc, wmon, dex), false);
+  });
+});
+
+describe("parseSwapConfirm", () => {
+  it("y and yes select the best route (index 0)", () => {
+    assert.equal(parseSwapConfirm("y", 3), 0);
+    assert.equal(parseSwapConfirm("YES", 3), 0);
+  });
+  it("a listed number selects that route", () => {
+    assert.equal(parseSwapConfirm("1", 3), 0);
+    assert.equal(parseSwapConfirm("2", 3), 1);
+    assert.equal(parseSwapConfirm("3", 3), 2);
+  });
+  it("rejects trailing garbage that parseInt would accept", () => {
+    assert.equal(parseSwapConfirm("1junk", 3), null);
+  });
+  it("rejects a leading zero, empty input, and an out-of-range number", () => {
+    assert.equal(parseSwapConfirm("01", 3), null);
+    assert.equal(parseSwapConfirm("", 3), null);
+    assert.equal(parseSwapConfirm("2", 1), null);
+    assert.equal(parseSwapConfirm("n", 3), null);
+  });
+});
+
+describe("buildSwapCalls — decoded calldata", () => {
+  const router = getAddress(config.chain.dex.router);
+  const recipient = getAddress("0x1111111111111111111111111111111111111111");
+  const routerIface = new Interface(ROUTER_ABI);
+  const erc20Iface = new Interface(["function approve(address spender, uint256 amount) returns (bool)"]);
+  const amountIn = 10n ** 17n; // 0.1
+  const minOut = 2_000_000n;
+
+  function deadlineWindow(decodedDeadline) {
+    const now = Math.floor(Date.now() / 1000);
+    const d = Number(decodedDeadline);
+    assert.ok(d >= now + SWAP_DEADLINE_SECONDS - 5, `deadline ${d} too early vs ${now}`);
+    assert.ok(d <= now + SWAP_DEADLINE_SECONDS + 5, `deadline ${d} too late vs ${now}`);
+  }
+
+  it("native in: swapExactETHForTokens, value = amountIn, no approve", () => {
+    const path = [WMON, USDC].map(getAddress);
+    const calls = buildSwapCalls({
+      path,
+      amountInRaw: amountIn,
+      minAmountOutRaw: minOut,
+      recipient,
+      nativeIn: true,
+      nativeOut: false,
+      needsApproval: false,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(getAddress(calls[0].to), router);
+    assert.equal(calls[0].value, amountIn);
+    const parsed = routerIface.parseTransaction({ data: calls[0].data });
+    assert.equal(parsed.name, "swapExactETHForTokens");
+    assert.equal(parsed.args[0], minOut);
+    assert.deepEqual(parsed.args[1].map(getAddress), path);
+    assert.equal(getAddress(parsed.args[2]), recipient);
+    deadlineWindow(parsed.args[3]);
+  });
+
+  it("native out: swapExactTokensForETH, value 0, optional approve first", () => {
+    const path = [USDC, WMON].map(getAddress);
+    const calls = buildSwapCalls({
+      path,
+      amountInRaw: amountIn,
+      minAmountOutRaw: minOut,
+      recipient,
+      nativeIn: false,
+      nativeOut: true,
+      needsApproval: true,
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(getAddress(calls[0].to), getAddress(USDC));
+    assert.equal(calls[0].value, 0n);
+    const approve = erc20Iface.parseTransaction({ data: calls[0].data });
+    assert.equal(approve.name, "approve");
+    assert.equal(getAddress(approve.args[0]), router);
+    assert.equal(approve.args[1], amountIn);
+
+    assert.equal(getAddress(calls[1].to), router);
+    assert.equal(calls[1].value, 0n);
+    const parsed = routerIface.parseTransaction({ data: calls[1].data });
+    assert.equal(parsed.name, "swapExactTokensForETH");
+    assert.equal(parsed.args[0], amountIn);
+    assert.equal(parsed.args[1], minOut);
+    assert.deepEqual(parsed.args[2].map(getAddress), path);
+    assert.equal(getAddress(parsed.args[3]), recipient);
+    deadlineWindow(parsed.args[4]);
+  });
+
+  it("token to token: swapExactTokensForTokens plus exact approve", () => {
+    const path = [USDC, USDT].map(getAddress);
+    const calls = buildSwapCalls({
+      path,
+      amountInRaw: amountIn,
+      minAmountOutRaw: minOut,
+      recipient,
+      nativeIn: false,
+      nativeOut: false,
+      needsApproval: true,
+    });
+    assert.equal(calls.length, 2);
+    const approve = erc20Iface.parseTransaction({ data: calls[0].data });
+    assert.equal(approve.name, "approve");
+    assert.equal(getAddress(approve.args[0]), router);
+    assert.equal(approve.args[1], amountIn);
+
+    const parsed = routerIface.parseTransaction({ data: calls[1].data });
+    assert.equal(parsed.name, "swapExactTokensForTokens");
+    assert.equal(getAddress(calls[1].to), router);
+    assert.equal(calls[1].value, 0n);
+    assert.equal(parsed.args[0], amountIn);
+    assert.equal(parsed.args[1], minOut);
+    assert.deepEqual(parsed.args[2].map(getAddress), path);
+    assert.equal(getAddress(parsed.args[3]), recipient);
+    deadlineWindow(parsed.args[4]);
+  });
+
+  it("skips approve when needsApproval is false", () => {
+    const path = [USDC, USDT].map(getAddress);
+    const calls = buildSwapCalls({
+      path,
+      amountInRaw: amountIn,
+      minAmountOutRaw: minOut,
+      recipient,
+      nativeIn: false,
+      nativeOut: false,
+      needsApproval: false,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(routerIface.parseTransaction({ data: calls[0].data }).name, "swapExactTokensForTokens");
   });
 });
