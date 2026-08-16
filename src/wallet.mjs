@@ -26,9 +26,39 @@ const ERC20_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
 ];
 
+const ERC721_ABI = [
+  "function balanceOf(address owner) view returns (uint256)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function tokenURI(uint256 tokenId) view returns (string)",
+  "function safeTransferFrom(address from, address to, uint256 tokenId)",
+  "function approve(address to, uint256 tokenId)",
+  "function getApproved(uint256 tokenId) view returns (address)",
+  "function isApprovedForAll(address owner, address operator) view returns (bool)",
+  "function setApprovalForAll(address operator, bool approved)",
+];
+
 function getReadProvider() {
   if (!readProvider) readProvider = new JsonRpcProvider(config.chain.rpcUrl, config.chain.chainId);
   return readProvider;
+}
+
+/**
+ * GET a path from the Reservoir indexer (see config.reservoirUrl).
+ *
+ * get_nfts goes through Reservoir instead of raw eth_getLogs/Transfer-event scanning:
+ * Monad prunes historical state, so an on-chain scan of past transfers is unreliable
+ * (this is why the explorer is the source of truth for holdings). Reservoir is the only
+ * new network dependency; nothing else about the wallet changes.
+ */
+async function fetchReservoir(path) {
+  if (!config.reservoirApiKey) {
+    throw new Error("RESERVOIR_API_KEY is not set. Get a free key at https://reservoir.tools, then put it in .env");
+  }
+  const res = await fetch(`${config.reservoirUrl}${path}`, { headers: { "x-api-key": config.reservoirApiKey } });
+  if (!res.ok) {
+    throw new Error(`Reservoir API error ${res.status}${res.statusText ? ` ${res.statusText}` : ""} for ${path}`);
+  }
+  return res.json();
 }
 
 function buildWalletConfig() {
@@ -152,6 +182,66 @@ export async function getTokenMetadata(tokenAddress) {
 export async function quoteSend(to, valueWei) {
   if (!account) throw new Error("Wallet not initialized");
   return account.quoteSendTransaction({ to, value: valueWei });
+}
+
+/**
+ * Owned ERC-721 tokens for an address (defaults to the agent's wallet).
+ *
+ * Reads come from the Reservoir indexer, not eth_getLogs — see fetchReservoir.
+ * Returns [{ contract, tokenId, name? }], one entry per token, tokenId as a string.
+ */
+export async function getNfts(ownerAddress = address) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const owner = checksumAddress(ownerAddress);
+  const data = await fetchReservoir(`/users/${owner}/tokens/v7?limit=100`);
+  // Known follow-up: page past 100 via the `continuation` field for wallets with more.
+  return (data?.tokens ?? []).map((entry) => {
+    const t = entry?.token ?? {};
+    return {
+      contract: checksumAddress(t.contract),
+      tokenId: String(t.tokenId),
+      ...(t.name ? { name: String(t.name) } : {}),
+    };
+  });
+}
+
+/**
+ * Broadcast (or, in dry-run, simulate) an ERC-721 transfer via safeTransferFrom.
+ *
+ * Verifies `fromAddress` actually owns the token first — a wrong owner is refused
+ * before anything is signed. `fromAddress` defaults to the agent's own wallet and
+ * only needs to differ when the agent holds an approval for someone else's NFT.
+ * Returns { dryRun } | { userOpHash, hash, fee }.
+ */
+export async function transferNft(to, contractAddress, tokenId, fromAddress = address) {
+  if (!account) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(contractAddress), ERC721_ABI, getReadProvider());
+  const owner = checksumAddress(await token.ownerOf(BigInt(tokenId)));
+  if (owner.toLowerCase() !== checksumAddress(fromAddress).toLowerCase()) {
+    throw new Error(
+      `Refused: ${fromAddress} does not own token #${tokenId} on ${contractAddress} — owner is ${owner}`,
+    );
+  }
+  const data = new Interface(ERC721_ABI).encodeFunctionData("safeTransferFrom", [
+    checksumAddress(fromAddress),
+    checksumAddress(to),
+    BigInt(tokenId),
+  ]);
+  const target = checksumAddress(contractAddress);
+  if (config.gasMode === "dry-run") {
+    let fee = 0n;
+    try {
+      const q = await account.quoteSendTransaction({ to: target, value: 0n, data });
+      fee = BigInt(q?.fee ?? 0);
+    } catch {
+      /* estimation may need a bundler; ignore in dry-run */
+    }
+    return { dryRun: true, to, contract: target, tokenId, fee };
+  }
+  const res = await account.sendTransaction({ to: target, value: 0n, data });
+  const userOpHash = res.hash;
+  const hash = await waitForUserOpTxHash(userOpHash);
+  return { userOpHash, hash, fee: BigInt(res.fee ?? 0) };
 }
 
 /**
