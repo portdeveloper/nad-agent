@@ -37,6 +37,12 @@ const pimlicoKey = process.env.PIMLICO_API_KEY || "";
 const sponsorshipPolicyId = process.env.PIMLICO_SPONSORSHIP_POLICY_ID || "";
 const gasOverride = (process.env.WDK_GAS_MODE || "").toLowerCase();
 
+// NFT reads (get_nfts) go through Reservoir's indexed API, not raw eth_getLogs:
+// Monad prunes historical state, so Transfer-event scanning is unreliable. The
+// default is Monad testnet; override the base URL for mainnet or a different indexer.
+const reservoirApiKey = process.env.RESERVOIR_API_KEY || "";
+const reservoirUrl = process.env.RESERVOIR_API_URL || "https://api-monad-testnet.reservoir.tools";
+
 // Resolve the effective gas mode:
 //   dry-run   -> simulate sends (no bundler needed). Auto-selected when no Pimlico key.
 //   sponsored -> gasless via Pimlico paymaster (agent pays 0)
@@ -134,6 +140,8 @@ export const config = {
     maxTokens: Number(process.env.QVAC_MAX_TOKENS || 256),
   },
   hasPimlicoKey: !!pimlicoKey,
+  reservoirApiKey,
+  reservoirUrl,
 };
 
 export function describeConfig() {
