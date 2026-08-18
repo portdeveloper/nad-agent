@@ -9,7 +9,7 @@
  * wallet is actually needed (and so the doctor/help paths work without it).
  */
 
-import { Contract, JsonRpcProvider, getAddress as checksumAddress, Interface, ZeroAddress } from "ethers";
+import { Contract, JsonRpcProvider, getAddress as checksumAddress } from "ethers";
 import { config, setAccountIndex } from "./config.mjs";
 
 let manager = null;
@@ -24,6 +24,8 @@ const ERC20_ABI = [
   "function symbol() view returns (string)",
   "function name() view returns (string)",
   "function transfer(address to, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
 ];
 
 function getReadProvider() {
@@ -133,6 +135,12 @@ export async function getTokenBalance(tokenAddress, ownerAddress = address) {
   return BigInt(await token.balanceOf(checksumAddress(ownerAddress)));
 }
 
+export async function getAllowance(tokenAddress, spender, ownerAddress = address) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
+  return BigInt(await token.allowance(checksumAddress(ownerAddress), checksumAddress(spender)));
+}
+
 export async function getTokenMetadata(tokenAddress) {
   const address = checksumAddress(tokenAddress);
   const token = new Contract(address, ERC20_ABI, getReadProvider());
@@ -197,6 +205,32 @@ export async function sendToken(to, tokenAddress, amountWei) {
   const userOpHash = res.hash;
   const hash = await waitForUserOpTxHash(userOpHash);
   return { userOpHash, hash, fee: BigInt(res.fee ?? 0) };
+}
+
+/**
+ * Broadcast (or, in dry-run, simulate) one or more contract calls as a single
+ * UserOperation. An array is atomic: approve + swap land together or not at all.
+ * Returns { dryRun, calls, fee } | { userOpHash, hash, fee, calls }.
+ */
+export async function sendCalls(calls) {
+  if (!account) throw new Error("Wallet not initialized");
+  if (!Array.isArray(calls) || calls.length === 0) {
+    throw new Error("No calls to send");
+  }
+  if (config.gasMode === "dry-run") {
+    let fee = 0n;
+    try {
+      const q = await account.quoteSendTransaction(calls);
+      fee = BigInt(q?.fee ?? 0);
+    } catch {
+      /* estimation may need a bundler; ignore in dry-run */
+    }
+    return { dryRun: true, calls, fee };
+  }
+  const res = await account.sendTransaction(calls);
+  const userOpHash = res.hash;
+  const hash = await waitForUserOpTxHash(userOpHash);
+  return { userOpHash, hash, fee: BigInt(res.fee ?? 0), calls };
 }
 
 /** Poll the bundler for the UserOperation receipt; return the on-chain tx hash (or null). */

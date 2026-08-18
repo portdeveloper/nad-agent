@@ -54,7 +54,7 @@ describe("parseAction — JSON path", () => {
   });
 
   it("unknown action returns none", () => {
-    assert.deepEqual(parseAction('{"action":"swap"}'), { action: "none" });
+    assert.deepEqual(parseAction('{"action":"bridge"}'), { action: "none" });
   });
 });
 
@@ -110,6 +110,10 @@ describe("isWrite", () => {
     assert.equal(isWrite("get_address"), false);
   });
 
+  it("swap is a write", () => {
+    assert.equal(isWrite("swap"), true);
+  });
+
   it("none is not a write", () => {
     assert.equal(isWrite("none"), false);
   });
@@ -132,6 +136,7 @@ describe("systemPrompt / ACTIONS invariance", () => {
     assert.ok(keys.includes("get_address"), "missing get_address in ACTIONS");
     assert.ok(keys.includes("get_balance"), "missing get_balance in ACTIONS");
     assert.ok(keys.includes("send_mon"), "missing send_mon in ACTIONS");
+    assert.ok(keys.includes("swap"), "missing swap in ACTIONS");
     assert.ok(keys.includes("none"), "missing none in ACTIONS");
   });
 });
