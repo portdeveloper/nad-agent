@@ -27,6 +27,7 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 - **`what's my USDC balance?`** → ERC-20 balance read by known testnet symbol or token address
 - **`send 0.1 MON to 0x…`** → asks you to confirm, then broadcasts a **gasless** transfer (the wallet pays 0 gas) and returns the on-chain tx hash + explorer link
 - **`send 0.1 MON to alice`** → resolves the name through your local address book and shows the address it resolved to *before* you confirm
+- **`swap 0.1 MON for USDC`** → quotes PuddleSwap (best star-route wins), you confirm, then a gasless swap (or dry-run)
 - anything else → the local model just replies in words
 
 It all runs **on-device**: the model never calls the cloud, and the wallet key never leaves the machine.
@@ -45,25 +46,24 @@ the wallet enforces it before every confirmation prompt:
 }
 ```
 
-- `maxPerSend` refuses any single send above the amount, in MON.
-- `maxPerSession` is a running total for the process lifetime. A dry-run send counts against it,
-  since the budget bounds what the agent attempts; a refused send does not.
-- `allowlist` restricts recipients; addresses are checksummed at load, so a typo fails at startup
-  rather than silently blocking a send later.
-
-The recipient rule binds **every write action**: a name or an address outside the allowlist is
-refused for token transfers as well as native sends. The MON amount limits apply to native sends,
-the only amounts denominated in MON.
+- `maxPerSend` refuses any single native MON send **or native-MON swap** above the amount.
+- `maxPerSession` is a running total for the process lifetime. A dry-run send or native-MON swap
+  counts against it, since the budget bounds what the agent attempts; a refused write does not.
+- `allowlist` restricts **send recipients**; addresses are checksummed at load, so a typo fails at
+  startup rather than silently blocking a send later. Swaps pay the agent's own Safe, so the
+  allowlist does not apply to them.
+- If MON amount limits are configured and a swap's input is **not** MON, the swap is refused
+  rather than silently skipping a rule the wallet cannot evaluate.
 
 Every field is optional and **no file means no policy**, so behavior is unchanged unless you opt
-in. A violation is refused at the single resolve point, alongside the recipient check, naming the rule
+in. A violation is refused before the prompt, naming the rule
 (`policy maxPerSend: amount 0.9 MON is above the policy limit of 0.5 MON per send.`), and the
 confirmation block gains a `Policy:` line showing what applied. A malformed policy file stops the
 agent at startup instead of being ignored.
 
 ---
 
-**Scope (v0):** native MON sends plus read-only ERC-20 balance checks — `get_address`, `get_balance`, `get_token_balance`, `send`. No ERC-20 transfers, swaps, bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first. It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
+**Scope (v0):** native MON sends, ERC-20 balance reads and transfers, and **testnet token swaps** via PuddleSwap — `get_address`, `get_balance`, `get_token_balance`, `send_mon`, `send_token`, `swap`. No bridges, NFTs, or arbitrary contract calls yet; single account; testnet-first (swaps refuse on mainnet). It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
 
 ---
 
@@ -94,6 +94,23 @@ Resolution refuses rather than guesses. An unknown name, an entry whose address 
 one name spelled two ways (`alice` and `Alice`) with two different addresses are each reported and
 the send is declined — a wrong recipient is not recoverable. A key repeated verbatim is JSON's own
 business: `{"alice": A, "alice": B}` means B, and the parser settles it before we see the file.
+
+---
+
+## Swaps (testnet)
+
+`swap` trades through [PuddleSwap](https://app.puddleswap.org), portdeveloper's Uniswap-V2 DEX on
+Monad testnet. Quotes are batched `eth_call`s to the router (Multicall3) — no swap API. The agent
+quotes every liquid star-route (direct, then hops through USDC / USDT / WMON) and **auto-picks the
+best output**, same as the PuddleSwap UI. Confirm is `y/N`. At `y` it re-quotes once; if output
+fell below the min-out you saw, it refuses (cancel and `/swap` again). Slippage defaults to 1%
+(`SWAP_SLIPPAGE_PERCENT`). Mainnet refuses.
+
+`/swap 0.1 MON USDC` skips the model. Native MON in/out is supported; MON ↔ WMON is a wrap, not a
+swap, and is refused. ERC-20 approve is an exact amount, batched with the swap into one UserOp.
+A configured spend policy applies `maxPerSend` / `maxPerSession` to native-MON swaps and refuses
+an ERC-20-input swap when those MON limits are set (the wallet will not skip a rule it cannot
+evaluate). The recipient allowlist does not apply: swap output returns to the agent's own Safe.
 
 ---
 
@@ -152,9 +169,10 @@ Then talk to it:
 › what's my address?
 › what's my balance?
 › send 0.1 MON to 0xABCD…            # asks you to confirm, then broadcasts (or dry-runs)
+› swap 0.1 MON for USDC              # quotes best PuddleSwap path, you confirm, then dry-run or swap
 ```
 
-Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/send <to> <mon>` `/config` `/help` `/exit`.
+Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/send <to> <mon>` `/swap <amt> <in> <out>` `/config` `/help` `/exit`.
 
 ---
 
@@ -211,6 +229,7 @@ open a PR. Security bugs go through [SECURITY.md](./SECURITY.md), not public iss
 src/config.mjs       env → resolved config (the only machine-specific behavior)
 src/policy.mjs       optional spend policy: load, validate, enforce before the prompt
 src/wallet.mjs       WDK Safe ERC-4337 account on Monad (+ dry-run)
+src/swap.mjs         PuddleSwap quote + calldata (star routing, Multicall3, testnet-only)
 src/agent.mjs        QVAC local model: load / stream / unload
 src/addressBook.mjs  recipient resolution: alias → address
 src/tools.mjs        wallet actions + NL→action interpreter

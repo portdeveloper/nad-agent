@@ -94,9 +94,29 @@ export function hasRules(policy) {
  * the allowlist governs the recipient of every write, while the MON amount
  * limits only bind sends actually denominated in MON.
  */
+/** MON amount limits shared by sends and native-in swaps. No recipient. */
+function checkAmountLimits(policy, { value, sessionSpent = 0n }) {
+  const symbol = "MON";
+  if (policy.maxPerSend != null && value > policy.maxPerSend) {
+    return {
+      ok: false,
+      rule: "maxPerSend",
+      message: `amount ${formatMon(value)} ${symbol} is above the policy limit of ${formatMon(policy.maxPerSend)} ${symbol} per send.`,
+    };
+  }
+  if (policy.maxPerSession != null && sessionSpent + value > policy.maxPerSession) {
+    const left = policy.maxPerSession - sessionSpent;
+    return {
+      ok: false,
+      rule: "maxPerSession",
+      message: `this send would exceed the policy session budget of ${formatMon(policy.maxPerSession)} ${symbol} (${formatMon(left > 0n ? left : 0n)} ${symbol} left).`,
+    };
+  }
+  return { ok: true };
+}
+
 export function checkPolicy(policy, { to, value, sessionSpent = 0n }) {
   if (!hasRules(policy)) return { ok: true };
-  const symbol = "MON";
 
   const lower = to.toLowerCase();
   if (policy.allowlist && !policy.allowlist.some((a) => a.toLowerCase() === lower)) {
@@ -108,25 +128,43 @@ export function checkPolicy(policy, { to, value, sessionSpent = 0n }) {
   }
 
   if (value == null) return { ok: true };
+  return checkAmountLimits(policy, { value, sessionSpent });
+}
 
-  if (policy.maxPerSend != null && value > policy.maxPerSend) {
+/**
+ * Spend policy for swaps. Swaps have no third-party recipient, so the allowlist
+ * does not apply (output always returns to the agent's own Safe). MON amount
+ * limits apply when the input is native MON. If those limits are configured and
+ * the input is not MON, refuse rather than silently skipping a rule we cannot
+ * evaluate.
+ */
+export function checkSwapPolicy(policy, { nativeIn, value, sessionSpent = 0n }) {
+  if (!hasRules(policy)) return { ok: true };
+  const amountRules = policy.maxPerSend != null || policy.maxPerSession != null;
+  if (!amountRules) return { ok: true };
+
+  if (!nativeIn) {
+    const rule = policy.maxPerSend != null ? "maxPerSend" : "maxPerSession";
     return {
       ok: false,
-      rule: "maxPerSend",
-      message: `amount ${formatMon(value)} ${symbol} is above the policy limit of ${formatMon(policy.maxPerSend)} ${symbol} per send.`,
+      rule,
+      message: "swap input is not MON, so the policy MON limits cannot be evaluated.",
     };
   }
 
-  if (policy.maxPerSession != null && sessionSpent + value > policy.maxPerSession) {
-    const left = policy.maxPerSession - sessionSpent;
-    return {
-      ok: false,
-      rule: "maxPerSession",
-      message: `this send would exceed the policy session budget of ${formatMon(policy.maxPerSession)} ${symbol} (${formatMon(left > 0n ? left : 0n)} ${symbol} left).`,
-    };
+  if (value == null) {
+    return { ok: false, rule: "maxPerSend", message: "native swap amount is missing." };
   }
 
-  return { ok: true };
+  return checkAmountLimits(policy, { value, sessionSpent });
+}
+
+/** One-line summary of swap policy (amount rules only; no recipient allowlist). */
+export function describeSwapPolicy(policy, { nativeIn, value, sessionSpent = 0n }) {
+  if (!hasRules(policy)) return null;
+  if (!nativeIn) return null;
+  if (policy.maxPerSend == null && policy.maxPerSession == null) return null;
+  return describePolicy({ ...policy, allowlist: null, path: policy.path }, { value, sessionSpent });
 }
 
 /** One-line summary of what applied, shown in the confirmation block. */
