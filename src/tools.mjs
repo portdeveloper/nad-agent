@@ -26,6 +26,10 @@ export const ACTIONS = {
     args: ["token", "to", "amount"],
     desc: "Send an ERC-20 token to `to` — a 0x address or an address-book name. `token` is a symbol (e.g. USDC) or contract address. `amount` is a human-readable string.",
   },
+  account: {
+    args: ["index"],
+    desc: "List derived accounts (no args) or switch to account `index` (BIP-44).",
+  },
   none: { args: [], desc: "The message is not an on-chain request; just reply in words." },
 };
 
@@ -83,12 +87,24 @@ export function parseAction(text) {
   }
   // Small models often emit `get_balance()` instead of JSON. Recognize READ-ONLY
   // action names in the text — but never auto-trigger a write (send needs real args).
+  // Only accept the extracted token if it looks like a real identifier: a 0x address,
+  // or a short alphanumeric symbol (<=20 chars). This prevents sensitive strings
+  // embedded in model output from leaking into error messages.
+  const sanitizeLenientToken = (raw) => {
+    const t = raw.trim();
+    if (/^0x[0-9a-fA-F]{40}$/.test(t)) return t;          // valid address
+    if (/^[a-zA-Z]{1,20}$/.test(t)) return t;              // short symbol
+    return null;                                             // garbage — ignore
+  };
   const tokenBalanceCall = text.match(/\bget_token_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
-  if (tokenBalanceCall) return { action: "get_token_balance", token: tokenBalanceCall[1] };
+  if (tokenBalanceCall) {
+    const t = sanitizeLenientToken(tokenBalanceCall[1]);
+    if (t) return { action: "get_token_balance", token: t };
+  }
   const balanceWithTokenCall = text.match(/\bget_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
   if (balanceWithTokenCall) {
-    const token = balanceWithTokenCall[1];
-    return isNativeToken(token) ? { action: "get_balance" } : { action: "get_token_balance", token };
+    const t = sanitizeLenientToken(balanceWithTokenCall[1]);
+    if (t) return isNativeToken(t) ? { action: "get_balance" } : { action: "get_token_balance", token: t };
   }
 
   const tokenBalancePhrase = parseTokenBalancePhrase(text);
@@ -138,6 +154,26 @@ export function isWrite(action) {
   return action === "send_mon" || action === "send_token";
 }
 
+/** Parse an account index from model output or CLI input.
+ *  Accepts: integer number, or decimal string that parses to an integer.
+ *  Rejects: booleans, null, undefined, objects, floats with fractional parts,
+ *  out-of-range values. Values > 0 that have no fractional part (e.g. 3.0,
+ *  which is a float literal but represents an integer) are accepted. */
+export function parseAccountIndex(raw) {
+  if (typeof raw === "number") {
+    if (!Number.isInteger(raw) || raw < 0 || raw > 999) return null;
+    return raw || 0; // normalize -0 to 0
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed === "") return null;
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < 0 || n > 999) return null;
+    return n || 0;
+  }
+  return null; // boolean, null, object, etc.
+}
+
 /** Human-readable preview of what an action will do (shown before confirmation). */
 export function describeAction(a, resolved) {
   switch (a.action) {
@@ -147,6 +183,13 @@ export function describeAction(a, resolved) {
       return "Read: your MON balance";
     case "get_token_balance":
       return `Read: your ${a.token ?? a.symbol ?? a.tokenAddress ?? "token"} token balance`;
+    case "account": {
+      const i = parseAccountIndex(a.index);
+      if (i !== null) {
+        return `Switch to account #${i}`;
+      }
+      return "Read: list derived accounts";
+    }
     case "send_mon": {
       // `resolved` is a separate argument, never a field on `a`: `a` is built from model
       // output. There is deliberately no fallback that resolves here — a second resolution
@@ -281,6 +324,22 @@ export async function runAction(a, resolved) {
       const label = symbol || token.address;
       const detail = name && name !== label ? ` (${name})` : "";
       return `${formatTokenUnits(bal, decimals)} ${label}${detail}\n  token: ${token.address}`;
+    }
+
+    case "account": {
+      const hasIndex = a.index !== undefined && a.index !== null && a.index !== "";
+      if (hasIndex) {
+        const i = parseAccountIndex(a.index);
+        if (i === null) return `Refused: "${safeEcho(a.index)}" is not a valid account index.`;
+        const newAddr = await wallet.switchAccount(i);
+        return `Switched to account #${i}\n  address: ${newAddr}`;
+      }
+      const accounts = await wallet.listAccounts(5);
+      const cur = wallet.getActiveAccountIndex();
+      const lines = accounts.map((acc) =>
+        `  ${acc.index === cur ? "→ " : "  "}#${acc.index}  ${acc.address}`
+      );
+      return `Derived accounts (active: #${cur}):\n${lines.join("\n")}`;
     }
 
     case "send_mon": {

@@ -63,7 +63,7 @@ import { parseMon } from "./format.mjs";
 import { loadPolicy, hasRules } from "./policy.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
-import { addressBookWarnings, formatRecipient } from "./addressBook.mjs";
+import { addressBookWarnings, formatRecipient, safeEcho } from "./addressBook.mjs";
 import {
   ACTIONS,
   systemPrompt,
@@ -74,6 +74,7 @@ import {
   previewSend,
   renderSendPreview,
   resolveSend,
+  parseAccountIndex,
 } from "./tools.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
@@ -231,6 +232,28 @@ async function handleAction(action) {
       return true;
     }
   }
+  // Account switch requires explicit confirmation (no on-chain recipient to resolve,
+  // but the active account IS global mutable state — the operator must approve).
+  if (action.action === "account" && action.index !== undefined && action.index !== null && action.index !== "") {
+    // Validate the index before showing confirmation: an invalid index should
+    // surface its refusal message, not a misleading "list accounts" description.
+    const validated = parseAccountIndex(action.index);
+    if (validated === null) {
+      const safe = safeEcho(action.index, 40);
+      println("\n  " + c.red(`Refused: "${safe}" is not a valid account index.`) + "\n");
+      if (SCRIPTED) hadFailure = true;
+      return true;
+    }
+    println("\n  " + c.yellow(describeAction(action)));
+    if (!(await confirmMainnetOnce())) {
+      println(c.dim("  cancelled.") + "\n");
+      return true;
+    }
+    if (!(await confirm("  confirm?"))) {
+      println(c.dim("  cancelled.") + "\n");
+      return true;
+    }
+  }
   try {
     const out = await runAction(action, resolved);
     // Only native amounts count against the session budget; token amounts are
@@ -270,6 +293,8 @@ async function handleSlash(line) {
         return true;
       }
       return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
+    case "account":
+      return handleAction({ action: "account", index: rest[0] ?? undefined });
     case "config":
       statusBlock();
       console.log("");
@@ -280,6 +305,7 @@ async function handleSlash(line) {
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance [token]") + c.dim("   native MON or ERC-20 balance") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
+          "  " + c.cyan("/account [index]") + c.dim("   list / switch derived account") + "\n" +
           "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
           "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
       );
