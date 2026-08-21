@@ -3,8 +3,8 @@
  *
  * Design note: v0 uses a model-agnostic JSON-action protocol (works even on a
  * 360M dev model) rather than betting on any one model's native tool-calling.
- * On a big model (GPT_OSS_20B) you can swap this for QVAC's native tool calling
- * or the official @tetherto/wdk-mcp-toolkit MCP server — see README "Upgrade path".
+ * On capable models, this module supports QVAC's native tool calling
+ * via getToolDefinitions() + toolHandlers. See README "Upgrade path".
  */
 
 import * as wallet from "./wallet.mjs";
@@ -354,5 +354,108 @@ export async function runAction(a, resolved) {
 
     default:
       return null; // caller falls back to a plain chat reply
+  }
+}
+
+/**
+ * Native tool-calling support: converts ACTIONS into OpenAI-compatible Tool definitions.
+ * Used with `completion({ tools: getToolDefinitions(), ... })` on capable models.
+ */
+export function getToolDefinitions() {
+  const SYMBOL = config.chain.symbol;
+  return [
+    {
+      type: "function",
+      name: "get_address",
+      description: "Show the agent's own wallet address.",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+    {
+      type: "function",
+      name: "get_balance",
+      description: "Show the agent's native MON balance.",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+    {
+      type: "function",
+      name: "get_token_balance",
+      description: "Show an ERC-20 token balance by token symbol or contract address.",
+      parameters: {
+        type: "object",
+        properties: {
+          token: {
+            type: "string",
+            description: "Token symbol (e.g. USDC) or contract address (0x...)",
+          },
+        },
+        required: ["token"],
+      },
+    },
+    {
+      type: "function",
+      name: "send_mon",
+      description: `Send native ${SYMBOL} to a recipient (0x address or address-book alias).`,
+      parameters: {
+        type: "object",
+        properties: {
+          to: {
+            type: "string",
+            description: "Recipient: 0x address or address-book alias",
+          },
+          amountMon: {
+            type: "string",
+            description: `Amount in ${SYMBOL} (e.g. '0.5')`,
+          },
+        },
+        required: ["to", "amountMon"],
+      },
+    },
+    {
+      type: "function",
+      name: "send_token",
+      description: "Send an ERC-20 token to a recipient (0x address or address-book alias).",
+      parameters: {
+        type: "object",
+        properties: {
+          token: {
+            type: "string",
+            description: "Token symbol (e.g. USDC) or contract address",
+          },
+          to: {
+            type: "string",
+            description: "Recipient: 0x address or address-book alias",
+          },
+          amount: {
+            type: "string",
+            description: "Amount as human-readable string (e.g. '100')",
+          },
+        },
+        required: ["token", "to", "amount"],
+      },
+    },
+  ];
+}
+
+/**
+ * Dispatch a tool call by name to the appropriate handler.
+ * Returns the result string (same as runAction output) or throws an error.
+ */
+export async function dispatchToolCall(toolName, toolArgs, resolved = null) {
+  switch (toolName) {
+    case "get_address":
+      return await runAction({ action: "get_address" }, null);
+    case "get_balance":
+      return await runAction({ action: "get_balance" }, null);
+    case "get_token_balance":
+      return await runAction({ action: "get_token_balance", token: toolArgs.token }, null);
+    case "send_mon":
+      return await runAction({ action: "send_mon", to: toolArgs.to, amountMon: toolArgs.amountMon }, resolved);
+    case "send_token":
+      return await runAction(
+        { action: "send_token", token: toolArgs.token, to: toolArgs.to, amount: toolArgs.amount },
+        resolved
+      );
+    default:
+      throw new Error(`Unknown tool: ${toolName}`);
   }
 }

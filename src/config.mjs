@@ -42,6 +42,9 @@ if (gasOverride === "dry-run" || !pimlicoKey) gasMode = "dry-run";
 else if (gasOverride === "native") gasMode = "native";
 else gasMode = "sponsored";
 
+const useNativeToolsEnv = (process.env.USE_NATIVE_TOOLS || "true").toLowerCase();
+const useNativeTools = useNativeToolsEnv === "true" || useNativeToolsEnv === "1";
+
 export const config = {
   chain,
   // Convenience flag for guardrails: mainnet moves real funds.
@@ -55,6 +58,9 @@ export const config = {
     ? `https://api.pimlico.io/v2/${chain.chainId}/rpc?apikey=${pimlicoKey}`
     : "",
   seed: process.env.WDK_SEED || "",
+  // Native tool-calling vs v0 JSON protocol. Set USE_NATIVE_TOOLS=false to fall back
+  // to the hand-rolled JSON-parsing protocol for small/dev models.
+  useNativeTools,
   model: {
     name: process.env.QVAC_MODEL || "QWEN3_8B_INST_Q4_K_M",
     localPath: process.env.QVAC_MODEL_PATH || "",

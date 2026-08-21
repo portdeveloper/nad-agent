@@ -74,6 +74,8 @@ import {
   previewSend,
   renderSendPreview,
   resolveSend,
+  getToolDefinitions,
+  dispatchToolCall,
 } from "./tools.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
@@ -133,6 +135,7 @@ function statusBlock() {
   );
   row("rpc", c.gray(config.chain.rpcUrl));
   row("gas", `${dot} ${gas}`);
+  row("tools", config.useNativeTools ? c.green("native") + c.dim(" · structured tool-calling") : c.cyan("v0") + c.dim(" · JSON protocol"));
 }
 
 function banner() {
@@ -354,26 +357,54 @@ async function main() {
       return await handleSlash(line);
     }
 
-    // Natural language -> ask the local model for an action. The model's raw
-    // output (thinking + JSON) streams dimmed to the conversational surface;
-    // the executed result prints bright on stdout.
+    // Natural language -> ask the local model for an action.
     history.push({ role: "user", content: line });
     printw("  " + DIM);
-    let raw = "";
+
     try {
-      raw = await brain.complete(history, (t) => printw(t));
-      printw(RST + "\n");
+      if (config.useNativeTools) {
+        // Native tool-calling path
+        const result = await brain.completeWithTools(history, getToolDefinitions(), (t) => printw(t));
+        printw(RST + "\n");
+
+        // Add assistant turn to history (use text or note that tool calls were made)
+        const assistantContent = result.text || `[tool calls: ${result.toolCalls.map((c) => c.name).join(", ")}]`;
+        history.push({ role: "assistant", content: assistantContent });
+
+        if (result.toolCalls && result.toolCalls.length > 0) {
+          // Dispatch each tool call
+          for (const toolCall of result.toolCalls) {
+            // Convert tool call to action for handleAction validation/confirmation flow
+            const action = { action: toolCall.name, ...toolCall.arguments };
+            const handled = await handleAction(action);
+            if (!handled) {
+              // Should not happen for writes, but just in case
+              println("");
+            }
+          }
+        } else if (result.text) {
+          // Model just chatted, text already streamed
+          println("");
+        } else {
+          println("");
+        }
+      } else {
+        // v0 JSON protocol path (fallback)
+        const raw = await brain.complete(history, (t) => printw(t));
+        printw(RST + "\n");
+        history.push({ role: "assistant", content: raw });
+
+        const action = parseAction(raw);
+        const handled = await handleAction(action);
+        if (!handled) println(""); // model chose to just chat; its text already streamed
+      }
     } catch (err) {
       printw(RST);
       println(c.red(`  model error: ${err.message}`) + "\n");
       if (SCRIPTED) hadFailure = true;
       return true;
     }
-    history.push({ role: "assistant", content: raw });
 
-    const action = parseAction(raw);
-    const handled = await handleAction(action);
-    if (!handled) println(""); // model chose to just chat; its text already streamed
     return true;
   }
 
