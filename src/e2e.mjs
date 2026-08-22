@@ -11,7 +11,20 @@ import { join } from "node:path";
 import { config, describeConfig } from "./config.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
-import { systemPrompt, parseAction, runAction, resolveSend } from "./tools.mjs";
+import {
+  systemPrompt,
+  parseAction,
+  runAction,
+  resolveSend,
+  prepareTokenSend,
+  previewTokenSend,
+  renderTokenSendPreview,
+} from "./tools.mjs";
+
+// `npm run smoke` is a safety-critical dry-run check even when the operator's .env contains
+// a Pimlico key. Force the shared config before wallet/tool code can execute a write, so this
+// entrypoint can never turn its smoke sends into sponsored or native broadcasts.
+config.gasMode = "dry-run";
 
 const TEST_ADDR = "0x000000000000000000000000000000000000dEaD";
 const log = (s = "") => console.log(s);
@@ -65,6 +78,26 @@ try {
   else process.env.NAD_ADDRESS_BOOK = prevBook;
   rmSync(bookDir, { recursive: true, force: true });
 }
+
+// 2c) Token send: prepare metadata and amount once, render the same confirmation data,
+// then execute the exact prepared values in dry-run mode.
+log("\nsend_token (dry-run):");
+const tokenSend = { action: "send_token", token: "USDC", to: TEST_ADDR, amount: "0.01" };
+const tokenPrep = await prepareTokenSend(tokenSend);
+if (!tokenPrep.ok) throw new Error("token send was refused before preview: " + tokenPrep.reason);
+const tokenPreview = await previewTokenSend(tokenPrep);
+if (!tokenPreview.ok) throw new Error("token preview failed: " + tokenPreview.reason);
+const tokenBlock = renderTokenSendPreview(tokenPreview);
+if (!tokenBlock.includes("USDC") || !tokenBlock.includes(TEST_ADDR)) {
+  throw new Error("token confirmation block is missing the token or resolved recipient");
+}
+log(indent(tokenBlock));
+const tokenSent = await runAction(tokenSend, tokenPrep.recipient, { preparedToken: tokenPrep });
+if (tokenSent.startsWith("Refused:")) throw new Error(tokenSent);
+if (!tokenSent.includes("0.01") || !tokenSent.includes(TEST_ADDR)) {
+  throw new Error("token dry-run receipt is missing the amount or resolved recipient");
+}
+log(indent(tokenSent));
 
 // 3) Local model: natural language -> action -> execute
 log("\nloading local model…");

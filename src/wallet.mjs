@@ -154,6 +154,14 @@ export async function quoteSend(to, valueWei) {
   return account.quoteSendTransaction({ to, value: valueWei });
 }
 
+export async function quoteTokenSend(to, tokenAddress, amountWei) {
+  if (!account) throw new Error("Wallet not initialized");
+  if (typeof account.quoteTransfer !== "function") {
+    throw new Error("token transfer quote is unavailable");
+  }
+  return account.quoteTransfer({ token: tokenAddress, recipient: to, amount: amountWei });
+}
+
 /**
  * Broadcast (or, in dry-run, simulate) a native MON transfer.
  * Returns { dryRun } | { userOpHash, hash, fee }.
