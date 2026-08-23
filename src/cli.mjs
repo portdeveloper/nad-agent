@@ -229,7 +229,7 @@ async function handleAction(action) {
       preparedToken = prep;
       let preview;
       try {
-        preview = await previewTokenSend(preparedToken);
+        preview = await previewTokenSend(preparedToken, { policy, sessionSpent });
       } catch (err) {
         println(c.red(`  Refused: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;

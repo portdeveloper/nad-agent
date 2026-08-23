@@ -20,6 +20,7 @@ import {
   previewTokenSend,
   renderTokenSendPreview,
 } from "./tools.mjs";
+import { flushSmokeSuccess } from "./smoke-exit.mjs";
 
 // `npm run smoke` is a safety-critical dry-run check even when the operator's .env contains
 // a Pimlico key. Force the shared config before wallet/tool code can execute a write, so this
@@ -124,8 +125,8 @@ for (const q of ["what is my MON balance?", `send 0.05 MON to ${TEST_ADDR}`]) {
 
 await brain.unloadBrain();
 wallet.dispose();
-log("\nSMOKE_OK");
 // QVAC's Bare worker can retain native child-process/socket handles after the SDK cleanup
 // round-trip. This is a one-shot smoke command, so terminate explicitly after the success
-// marker instead of leaving CI or a terminal waiting on a worker that has already completed.
-process.exit(0);
+// marker has been flushed instead of leaving CI or a terminal waiting on a worker that has
+// already completed.
+await flushSmokeSuccess();

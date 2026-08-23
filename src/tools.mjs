@@ -164,7 +164,7 @@ function knownTokenHint() {
  * The recipient and token metadata are resolved once here, and the parsed token amount is
  * returned with them so the caller can pass the exact prepared values into execution after
  * confirmation. Catalog tokens already carry metadata; raw token addresses must expose
- * decimals() (and may provide symbol()/name()) through the wallet read path.
+ * decimals() through the wallet read path and may provide symbol()/name() metadata.
  */
 export async function prepareTokenSend(
   a,
@@ -215,7 +215,7 @@ export async function prepareTokenSend(
     return { ok: false, reason: `token ${token.address} does not expose decimals().` };
   }
   if (typeof prepared.symbol !== "string" || !prepared.symbol.trim()) {
-    return { ok: false, reason: `token ${token.address} does not expose symbol().` };
+    prepared = { ...prepared, symbol: token.address };
   }
 
   const amountWei = parseTokenAmount(a.amount, prepared.decimals);
@@ -357,7 +357,7 @@ export function renderSendPreview(p) {
  */
 export async function previewTokenSend(
   prepared,
-  { getBalance = wallet.getTokenBalance, quoteSend = wallet.quoteTokenSend } = {},
+  { getBalance = wallet.getTokenBalance, quoteSend = wallet.quoteTokenSend, policy = null, sessionSpent = 0n } = {},
 ) {
   if (!prepared?.ok || !prepared.token || !prepared.recipient?.address) {
     return { ok: false, reason: "token send must be prepared before preview" };
@@ -376,14 +376,14 @@ export async function previewTokenSend(
   const symbol = safeEcho(token.symbol, 32);
   const name = token.name ? safeEcho(token.name, 64) : "";
   let fee = 0n;
-  let simulated = false;
-  let simError = null;
+  let feeQuoted = false;
+  let quoteError = null;
   try {
     const q = await quoteSend(recipient.address, token.address, amountWei);
     fee = BigInt(q?.fee ?? 0);
-    simulated = true;
+    feeQuoted = true;
   } catch (err) {
-    simError = safeEcho(err?.shortMessage || err?.message || "simulation unavailable", 160);
+    quoteError = safeEcho(err?.shortMessage || err?.message || "fee quote unavailable", 160);
   }
 
   return {
@@ -398,11 +398,12 @@ export async function previewTokenSend(
     before,
     after,
     fee,
-    simulated,
-    simError,
+    feeQuoted,
+    quoteError,
     nativeSymbol: SYMBOL(),
     gasLabel: sendGasLabel(),
     insufficient: amountWei > before,
+    policyNote: describePolicy(policy, { value: null, sessionSpent }),
   };
 }
 
@@ -414,15 +415,19 @@ export function renderTokenSendPreview(p) {
     `Contract: ${p.tokenAddress}`,
     `To:       ${p.to}`,
     `Amount:   ${p.amount} ${p.symbol}`,
-    `Gas:      ${p.gasLabel}` + (p.simulated && p.fee > 0n ? `  (~${formatMon(p.fee)} ${p.nativeSymbol})` : ""),
-    `Simulation:${p.simulated ? " available (transfer quote succeeded)" : " unavailable"}`,
+    `Gas:      ${p.gasLabel}` + (p.feeQuoted && p.fee > 0n ? `  (~${formatMon(p.fee)} ${p.nativeSymbol})` : ""),
+    `Fee quote:${p.feeQuoted ? " available (transfer fee quote succeeded)" : " unavailable"}`,
+    "Simulation: not performed by the fee-quote path",
     `Balance:  ${formatTokenUnits(p.before, p.decimals)} -> ${formatTokenUnits(p.after, p.decimals)} ${p.symbol}`,
   ];
   if (p.insufficient) {
     lines.push("WARNING:  token balance is below the amount — this send would revert.");
   }
-  if (p.simError && !p.insufficient) {
-    lines.push(`WARNING:  simulation unavailable (${p.simError}).`);
+  if (p.quoteError && !p.insufficient) {
+    lines.push(`WARNING:  fee quote unavailable (${p.quoteError}).`);
+  }
+  if (p.policyNote) {
+    lines.push(`Policy:   ${p.policyNote}`);
   }
   return lines.join("\n");
 }
@@ -539,12 +544,8 @@ export async function runAction(a, resolved, { preparedToken = null } = {}) {
       if (!token?.address || !Number.isInteger(token.decimals) || typeof amountWei !== "bigint" || amountWei <= 0n) {
         return "Refused: send_token has invalid prepared token values";
       }
-      if (typeof token.symbol !== "string" || !token.symbol.trim()) {
-        return `Refused: token ${token.address} does not expose symbol().`;
-      }
-
       const res = await wallet.sendToken(to, token.address, amountWei);
-      const label = safeEcho(token.symbol, 32);
+      const label = safeEcho(token.symbol || token.address, 32);
       const displayAmount = formatTokenUnits(amountWei, token.decimals);
 
       if (res.dryRun) {

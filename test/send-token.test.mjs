@@ -194,14 +194,15 @@ describe("prepareTokenSend", () => {
     assert.match(result.reason, /does not expose decimals/);
   });
 
-  it("refuses a token that does not expose symbol", async () => {
+  it("falls back to the contract address when a token has no symbol", async () => {
     const result = await prepareTokenSend(
       { action: "send_token", token: DEAD, to: DEAD, amount: "1" },
       { getMetadata: async () => ({ decimals: 6, name: "No Symbol Token" }) },
     );
 
-    assert.equal(result.ok, false);
-    assert.match(result.reason, /does not expose symbol/);
+    assert.equal(result.ok, true);
+    assert.equal(result.token.symbol, DEAD);
+    assert.equal(result.amountWei, 1_000_000n);
   });
 
   it("refuses an unknown token before metadata lookup", async () => {
@@ -264,13 +265,14 @@ describe("previewTokenSend", () => {
     assert.equal(preview.before, 10_000_000n);
     assert.equal(preview.after, 8_750_000n);
     assert.equal(preview.fee, 42_000_000_000_000n);
-    assert.equal(preview.simulated, true);
+    assert.equal(preview.feeQuoted, true);
     assert.equal(preview.insufficient, false);
     assert.match(preview.gasLabel, /dry-run|gasless|you pay gas/);
 
     const block = renderTokenSendPreview(preview);
     assert.match(block, /Gas:.*~0\.000042 MON/);
-    assert.match(block, /Simulation: available/);
+    assert.match(block, /Fee quote: available/);
+    assert.match(block, /Simulation: not performed/);
   });
 
   it("renders the gasless confirmation block", async () => {
@@ -286,7 +288,8 @@ describe("previewTokenSend", () => {
 
       assert.equal(preview.gasLabel, "gasless (paymaster covers fee)");
       assert.match(block, /Gas:\s+gasless \(paymaster covers fee\)/);
-      assert.match(block, /Simulation: available/);
+      assert.match(block, /Fee quote: available/);
+      assert.match(block, /Simulation: not performed/);
     } finally {
       config.gasMode = previousGasMode;
     }
@@ -303,7 +306,8 @@ describe("previewTokenSend", () => {
     assert.match(block, /To:\s+.*dEaD/i);
     assert.match(block, /Amount:\s+2\.0 USDC/);
     assert.match(block, /Gas:/);
-    assert.match(block, /Simulation: unavailable/);
+    assert.match(block, /Fee quote: unavailable/);
+    assert.match(block, /Simulation: not performed/);
     assert.match(block, /Balance:\s+1\.0 -> -1\.0 USDC/);
     assert.match(block, /WARNING:.*token balance is below/);
   });
@@ -316,10 +320,29 @@ describe("previewTokenSend", () => {
     });
     const block = renderTokenSendPreview(preview);
 
-    assert.equal(preview.simulated, false);
-    assert.match(preview.simError, /bundler unavailable/);
-    assert.match(block, /Simulation: unavailable/);
-    assert.match(block, /WARNING:.*simulation unavailable/);
+    assert.equal(preview.feeQuoted, false);
+    assert.match(preview.quoteError, /bundler unavailable/);
+    assert.match(block, /Fee quote: unavailable/);
+    assert.match(block, /Simulation: not performed/);
+    assert.match(block, /WARNING:.*fee quote unavailable/);
+  });
+
+  it("shows the recipient policy that applies to a token send", async () => {
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+    const preview = await previewTokenSend(prepared, {
+      policy: {
+        maxPerSend: 500_000_000_000_000_000n,
+        maxPerSession: 1_000_000_000_000_000_000n,
+        allowlist: [DEAD],
+      },
+      sessionSpent: 100_000_000_000_000_000n,
+      getBalance: async () => 10_000_000n,
+      quoteSend: async () => ({ fee: 0n }),
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.equal(preview.policyNote, "recipient allowlisted");
+    assert.match(block, /Policy:\s+recipient allowlisted/);
   });
 });
 
