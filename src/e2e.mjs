@@ -125,3 +125,7 @@ for (const q of ["what is my MON balance?", `send 0.05 MON to ${TEST_ADDR}`]) {
 await brain.unloadBrain();
 wallet.dispose();
 log("\nSMOKE_OK");
+// QVAC's Bare worker can retain native child-process/socket handles after the SDK cleanup
+// round-trip. This is a one-shot smoke command, so terminate explicitly after the success
+// marker instead of leaving CI or a terminal waiting on a worker that has already completed.
+process.exit(0);
