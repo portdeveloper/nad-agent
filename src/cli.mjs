@@ -7,6 +7,7 @@
  * Reliable slash-commands bypass the model entirely:
  *   /address           show the agent's wallet address
  *   /balance [token]   show native MON or ERC-20 token balance
+ *   /history           show recent MON transactions
  *   /send <to> <mon>   send MON (asks for confirmation)
  *   /swap <amt> <in> <out>  swap tokens on PuddleSwap (asks for confirmation)
  *   /account [index]   list or switch derived account
@@ -61,7 +62,7 @@ const println = (...a) => (SCRIPTED ? console.error(...a) : console.log(...a));
 const printw = (s) => (SCRIPTED ? process.stderr.write(s) : process.stdout.write(s));
 
 import { config } from "./config.mjs";
-import { parseMon } from "./format.mjs";
+import { formatMon, parseMon } from "./format.mjs";
 import { loadPolicy, hasRules } from "./policy.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
@@ -329,6 +330,31 @@ async function handleSlash(line) {
       return rest.length
         ? handleAction({ action: "get_token_balance", token: rest.join(" ") })
         : handleAction({ action: "get_balance" });
+    case "history": {
+      if (rest.length) {
+        println(c.dim("  usage: /history") + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      try {
+        const entries = await wallet.getHistory();
+        if (!entries.length) {
+          println("  no recent transactions found.\n");
+          return true;
+        }
+        println("  " + c.violet(c.bold("recent transactions")));
+        for (const tx of entries) {
+          const sign = tx.direction === "out" ? "-" : "+";
+          println(`  ${tx.direction.padEnd(3)} ${sign}${formatMon(tx.amount)} ${config.chain.symbol}  ${tx.hash}` +
+            (tx.explorerUrl ? `\n       ${tx.explorerUrl}` : ""));
+        }
+        println("");
+      } catch (err) {
+        println(c.red(`  history error: ${err.message}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+      }
+      return true;
+    }
     case "send":
       // Wrong arity gets the usage line, not a confusing refusal about
       // "undefined" being a bad address. Scripted mode still counts it as a
@@ -355,6 +381,7 @@ async function handleSlash(line) {
         "\n  " + c.violet(c.bold("commands")) + "\n" +
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance [token]") + c.dim("   native MON or ERC-20 balance") + "\n" +
+          "  " + c.cyan("/history") + c.dim("           recent MON transactions") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
           "  " + c.cyan("/account [index]") + c.dim("   list / switch derived account") + "\n" +
           "  " + c.cyan("/swap <amt> <in> <out>") + c.dim("  swap tokens on PuddleSwap") + "\n" +

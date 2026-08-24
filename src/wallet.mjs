@@ -154,6 +154,58 @@ export async function listAccounts(count = 5) {
   return accounts;
 }
 
+export function normalizeHistoryTransaction(tx, ownerAddress = address) {
+  if (!tx || !ownerAddress) return null;
+  const owner = String(ownerAddress).toLowerCase();
+  const fromAddress = tx.from?.hash ?? tx.from;
+  const toAddress = tx.to?.hash ?? tx.to;
+  const from = String(fromAddress ?? "").toLowerCase();
+  const to = String(toAddress ?? "").toLowerCase();
+  if (from !== owner && to !== owner) return null;
+  const direction = from === owner ? "out" : "in";
+  const amount = BigInt(tx.value ?? 0);
+  const hash = tx.hash ?? tx.transaction_hash ?? tx.transactionHash;
+  if (!hash) return null;
+  return {
+    hash,
+    direction,
+    amount,
+    timestamp: tx.timestamp ?? null,
+    explorerUrl: `${config.chain.explorerUrl}/tx/${hash}`,
+  };
+}
+
+async function fetchExplorerItems(path, fetchImpl) {
+  const res = await fetchImpl(`${config.chain.explorerUrl}${path}`, {
+    headers: { accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`MonadScan API error ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data?.items ?? []);
+}
+
+/** Read recent native transfers involving the smart account from MonadScan. */
+export async function getHistory({ limit = 10, ownerAddress = address, fetchImpl = fetch } = {}) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const cap = Math.max(1, Math.min(Number(limit) || 10, 50));
+  const owner = checksumAddress(ownerAddress);
+  const encoded = encodeURIComponent(owner);
+  const results = await Promise.allSettled([
+    fetchExplorerItems(`/api/v2/addresses/${encoded}/transactions`, fetchImpl),
+    fetchExplorerItems(`/api/v2/addresses/${encoded}/internal-transactions`, fetchImpl),
+  ]);
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  if (!fulfilled.length) {
+    throw results[0].reason;
+  }
+  const entries = fulfilled
+    .flatMap((result) => result.value)
+    .map((tx) => normalizeHistoryTransaction(tx, owner))
+    .filter(Boolean)
+    .sort((a, b) => String(b.timestamp ?? "").localeCompare(String(a.timestamp ?? "")));
+  return entries.slice(0, cap);
+}
+
 export async function getBalance() {
   if (!account) throw new Error("Wallet not initialized");
   return account.getBalance(); // bigint wei
