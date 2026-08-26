@@ -243,36 +243,49 @@ describe("prepareTokenSend", () => {
 
 describe("previewTokenSend", () => {
   it("shows token metadata, amount, recipient, gas mode, and token balance delta", async () => {
-    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1.25" });
-    const preview = await previewTokenSend(prepared, {
-      getBalance: async (address) => {
-        assert.equal(address, prepared.token.address);
-        return 10_000_000n;
-      },
-      quoteSend: async (to, tokenAddress, amountWei) => {
-        assert.equal(to, DEAD);
-        assert.equal(tokenAddress, prepared.token.address);
-        assert.equal(amountWei, 1_250_000n);
-        return { fee: 42_000_000_000_000n };
-      },
-    });
+    const previousGasMode = config.gasMode;
+    config.gasMode = "dry-run";
+    try {
+      const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1.25" });
+      const preview = await previewTokenSend(prepared, {
+        getBalance: async (address) => {
+          assert.equal(address, prepared.token.address);
+          return 10_000_000n;
+        },
+        quoteSend: async (to, tokenAddress, amountWei) => {
+          assert.equal(to, DEAD);
+          assert.equal(tokenAddress, prepared.token.address);
+          assert.equal(amountWei, 1_250_000n);
+          return { fee: 42_000_000_000_000n };
+        },
+        simulateSend: async (to, tokenAddress, amountWei) => {
+          assert.equal(to, DEAD);
+          assert.equal(tokenAddress, prepared.token.address);
+          assert.equal(amountWei, 1_250_000n);
+          return { simulated: true };
+        },
+      });
 
-    assert.equal(preview.ok, true);
-    assert.equal(preview.to, DEAD);
-    assert.equal(preview.tokenAddress, prepared.token.address);
-    assert.equal(preview.amount, "1.25");
-    assert.equal(preview.amountWei, 1_250_000n);
-    assert.equal(preview.before, 10_000_000n);
-    assert.equal(preview.after, 8_750_000n);
-    assert.equal(preview.fee, 42_000_000_000_000n);
-    assert.equal(preview.feeQuoted, true);
-    assert.equal(preview.insufficient, false);
-    assert.match(preview.gasLabel, /dry-run|gasless|you pay gas/);
+      assert.equal(preview.ok, true);
+      assert.equal(preview.to, DEAD);
+      assert.equal(preview.tokenAddress, prepared.token.address);
+      assert.equal(preview.amount, "1.25");
+      assert.equal(preview.amountWei, 1_250_000n);
+      assert.equal(preview.before, 10_000_000n);
+      assert.equal(preview.after, 8_750_000n);
+      assert.equal(preview.fee, 42_000_000_000_000n);
+      assert.equal(preview.feeQuoted, true);
+      assert.equal(preview.simulated, true);
+      assert.equal(preview.insufficient, false);
+      assert.match(preview.gasLabel, /dry-run|gasless|you pay gas/);
 
-    const block = renderTokenSendPreview(preview);
-    assert.match(block, /Gas:.*~0\.000042 MON/);
-    assert.match(block, /Fee quote: available/);
-    assert.match(block, /Simulation: not performed/);
+      const block = renderTokenSendPreview(preview);
+      assert.match(block, /Gas:.*~0\.000042 MON/);
+      assert.match(block, /Fee quote: available/);
+      assert.match(block, /Simulation: available/);
+    } finally {
+      config.gasMode = previousGasMode;
+    }
   });
 
   it("renders the gasless confirmation block", async () => {
@@ -283,13 +296,14 @@ describe("previewTokenSend", () => {
       const preview = await previewTokenSend(prepared, {
         getBalance: async () => 10_000_000n,
         quoteSend: async () => ({ fee: 42_000_000_000_000n }),
+        simulateSend: async () => ({ simulated: true }),
       });
       const block = renderTokenSendPreview(preview);
 
       assert.equal(preview.gasLabel, "gasless (paymaster covers fee)");
       assert.match(block, /Gas:\s+gasless \(paymaster covers fee\)/);
       assert.match(block, /Fee quote: available/);
-      assert.match(block, /Simulation: not performed/);
+      assert.match(block, /Simulation: available/);
     } finally {
       config.gasMode = previousGasMode;
     }
@@ -297,7 +311,10 @@ describe("previewTokenSend", () => {
 
   it("renders a warning when the token balance is insufficient", async () => {
     const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "2" });
-    const preview = await previewTokenSend(prepared, { getBalance: async () => 1_000_000n });
+    const preview = await previewTokenSend(prepared, {
+      getBalance: async () => 1_000_000n,
+      simulateSend: async () => ({ simulated: true }),
+    });
     const block = renderTokenSendPreview(preview);
 
     assert.equal(preview.insufficient, true);
@@ -307,7 +324,7 @@ describe("previewTokenSend", () => {
     assert.match(block, /Amount:\s+2\.0 USDC/);
     assert.match(block, /Gas:/);
     assert.match(block, /Fee quote: unavailable/);
-    assert.match(block, /Simulation: not performed/);
+    assert.match(block, /Simulation: available/);
     assert.match(block, /Balance:\s+1\.0 -> -1\.0 USDC/);
     assert.match(block, /WARNING:.*token balance is below/);
   });
@@ -317,14 +334,30 @@ describe("previewTokenSend", () => {
     const preview = await previewTokenSend(prepared, {
       getBalance: async () => 10_000_000n,
       quoteSend: async () => { throw new Error("bundler unavailable"); },
+      simulateSend: async () => ({ simulated: true }),
     });
     const block = renderTokenSendPreview(preview);
 
     assert.equal(preview.feeQuoted, false);
     assert.match(preview.quoteError, /bundler unavailable/);
     assert.match(block, /Fee quote: unavailable/);
-    assert.match(block, /Simulation: not performed/);
+    assert.match(block, /Simulation: available/);
     assert.match(block, /WARNING:.*fee quote unavailable/);
+  });
+
+  it("surfaces a transfer simulation warning before confirmation", async () => {
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+    const preview = await previewTokenSend(prepared, {
+      getBalance: async () => 10_000_000n,
+      quoteSend: async () => ({ fee: 0n }),
+      simulateSend: async () => { throw new Error("execution reverted: insufficient balance"); },
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.equal(preview.simulated, false);
+    assert.match(preview.simulationError, /insufficient balance/);
+    assert.match(block, /Simulation: unavailable/);
+    assert.match(block, /WARNING:.*simulation failed/);
   });
 
   it("shows the recipient policy that applies to a token send", async () => {

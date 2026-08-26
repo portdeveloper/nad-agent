@@ -253,6 +253,24 @@ export async function quoteTokenSend(to, tokenAddress, amountWei) {
 }
 
 /**
+ * Simulate the ERC-20 call that the smart account will execute.
+ *
+ * This is deliberately separate from quoteTransfer(): sponsored WDK quotes can return a
+ * zero fee without estimating or executing the transfer. An eth_call against the token with
+ * the smart-account address as `from` exercises the same ERC-20 balance/recipient checks in
+ * both dry-run and gasless modes, without broadcasting or requiring a paymaster round-trip.
+ */
+export async function simulateTokenSend(to, tokenAddress, amountWei) {
+  if (!account || !address) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
+  const result = await token.transfer.staticCall(checksumAddress(to), amountWei, {
+    from: checksumAddress(address),
+  });
+  if (result === false) throw new Error("token transfer returned false");
+  return { simulated: true };
+}
+
+/**
  * Owned ERC-721 tokens for an address (defaults to the agent's wallet).
  *
  * Reads come from the Reservoir indexer, not eth_getLogs — see fetchReservoir.

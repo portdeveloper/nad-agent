@@ -447,7 +447,13 @@ export function renderSendPreview(p) {
  */
 export async function previewTokenSend(
   prepared,
-  { getBalance = wallet.getTokenBalance, quoteSend = wallet.quoteTokenSend, policy = null, sessionSpent = 0n } = {},
+  {
+    getBalance = wallet.getTokenBalance,
+    quoteSend = wallet.quoteTokenSend,
+    simulateSend = wallet.simulateTokenSend,
+    policy = null,
+    sessionSpent = 0n,
+  } = {},
 ) {
   if (!prepared?.ok || !prepared.token || !prepared.recipient?.address) {
     return { ok: false, reason: "token send must be prepared before preview" };
@@ -476,6 +482,16 @@ export async function previewTokenSend(
     quoteError = safeEcho(err?.shortMessage || err?.message || "fee quote unavailable", 160);
   }
 
+  let simulated = false;
+  let simulationError = null;
+  try {
+    const result = await simulateSend(recipient.address, token.address, amountWei);
+    simulated = result?.simulated !== false;
+    if (!simulated) simulationError = "transfer simulation unavailable";
+  } catch (err) {
+    simulationError = safeEcho(err?.shortMessage || err?.message || "simulation failed", 160);
+  }
+
   return {
     ok: true,
     to: recipient.address,
@@ -490,6 +506,8 @@ export async function previewTokenSend(
     fee,
     feeQuoted,
     quoteError,
+    simulated,
+    simulationError,
     nativeSymbol: SYMBOL(),
     gasLabel: sendGasLabel(),
     insufficient: amountWei > before,
@@ -507,7 +525,7 @@ export function renderTokenSendPreview(p) {
     `Amount:   ${p.amount} ${p.symbol}`,
     `Gas:      ${p.gasLabel}` + (p.feeQuoted && p.fee > 0n ? `  (~${formatMon(p.fee)} ${p.nativeSymbol})` : ""),
     `Fee quote:${p.feeQuoted ? " available (transfer fee quote succeeded)" : " unavailable"}`,
-    "Simulation: not performed by the fee-quote path",
+    `Simulation:${p.simulated ? " available (transfer call succeeded)" : " unavailable"}`,
     `Balance:  ${formatTokenUnits(p.before, p.decimals)} -> ${formatTokenUnits(p.after, p.decimals)} ${p.symbol}`,
   ];
   if (p.insufficient) {
@@ -515,6 +533,9 @@ export function renderTokenSendPreview(p) {
   }
   if (p.quoteError && !p.insufficient) {
     lines.push(`WARNING:  fee quote unavailable (${p.quoteError}).`);
+  }
+  if (p.simulationError && !p.insufficient) {
+    lines.push(`WARNING:  simulation failed, this send may revert (${p.simulationError}).`);
   }
   if (p.policyNote) {
     lines.push(`Policy:   ${p.policyNote}`);

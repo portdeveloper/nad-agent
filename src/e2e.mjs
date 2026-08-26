@@ -29,7 +29,9 @@ import { flushSmokeSuccess } from "./smoke-exit.mjs";
 // entrypoint can never turn its smoke sends into sponsored or native broadcasts.
 config.gasMode = "dry-run";
 
-const TEST_ADDR = "0x000000000000000000000000000000000000dEaD";
+// Avoid a highly repetitive address here: the bundled small model can occasionally
+// drop one zero while copying it, which makes the model-driven smoke step flaky.
+const TEST_ADDR = "0x1234567890abcdef1234567890abcdef12345678";
 const log = (s = "") => console.log(s);
 const indent = (s) => "  " + String(s).replace(/\n/g, "\n  ");
 
