@@ -103,28 +103,79 @@ export function systemPrompt() {
   );
 }
 
+function normalizeParsedAction(obj) {
+  if (!obj?.action || !ACTIONS[obj.action]) return null;
+  const token = obj.token ?? obj.symbol ?? obj.tokenAddress;
+  if (obj.action === "get_balance" && token && !isNativeToken(token)) {
+    return { action: "get_token_balance", token };
+  }
+  if (obj.action === "swap") {
+    return {
+      action: "swap",
+      amountIn: String(obj.amountIn ?? obj.amount ?? ""),
+      tokenIn: obj.tokenIn ?? obj.from,
+      tokenOut: obj.tokenOut ?? obj.to,
+    };
+  }
+  if (obj.action === "transfer_nft" && !obj.to && obj.toAddress) obj = { ...obj, to: obj.toAddress };
+  return obj;
+}
+
+function hasRequiredArgs(action) {
+  if (action.action === "account" || action.action === "get_nfts") return true;
+  const aliases = { token: ["token", "symbol", "tokenAddress"], to: ["to", "toAddress"] };
+  return (ACTIONS[action.action]?.args ?? []).every((key) => {
+    const keys = aliases[key] ?? [key];
+    return keys.some((candidate) =>
+      action[candidate] !== undefined && action[candidate] !== null && String(action[candidate]).trim() !== ""
+    );
+  });
+}
+
+function extractJsonCandidates(text) {
+  const source = String(text ?? "").replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
+  const candidates = [];
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== "{") continue;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let j = i; j < source.length; j++) {
+      const ch = source[j];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') quoted = false;
+        continue;
+      }
+      if (ch === '"') { quoted = true; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) {
+        candidates.push(source.slice(i, j + 1));
+        i = j;
+        break;
+      }
+    }
+  }
+  return { source, candidates };
+}
+
 /** Extract an action from a model response: JSON first, then a lenient fallback. */
 export function parseAction(text) {
-  const m = text.match(/\{[\s\S]*?\}/);
-  if (m) {
+  const extracted = extractJsonCandidates(text);
+  let sawAction = false;
+  for (const candidate of extracted.candidates.reverse()) {
     try {
-      const obj = JSON.parse(m[0]);
-      const token = obj.token ?? obj.symbol ?? obj.tokenAddress;
-      if (obj.action === "get_balance" && token && !isNativeToken(token)) {
-        return { action: "get_token_balance", token };
-      }
-      if (obj.action === "swap") {
-        return {
-          action: "swap",
-          amountIn: String(obj.amountIn ?? obj.amount ?? ""),
-          tokenIn: obj.tokenIn ?? obj.from,
-          tokenOut: obj.tokenOut ?? obj.to,
-        };
-      }
-      if (obj.action && ACTIONS[obj.action]) return obj;
+      const action = normalizeParsedAction(JSON.parse(candidate));
+      if (!action) continue;
+      sawAction = true;
+      if (hasRequiredArgs(action)) return action;
     } catch {
-      /* fall through to the lenient path */
+      /* try the next JSON object */
     }
+  }
+  if (sawAction || (extracted.source.includes("{") && /\"action\"\s*:/i.test(extracted.source))) {
+    return { action: "none" };
   }
   // Small models often emit `get_balance()` instead of JSON. Recognize READ-ONLY
   // action names in the text — but never auto-trigger a write (send needs real args).

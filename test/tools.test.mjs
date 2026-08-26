@@ -39,6 +39,28 @@ describe("parseAction — JSON path", () => {
     assert.deepEqual(parseAction(input), { action: "get_balance" });
   });
 
+  it("ignores JSON-looking fragments inside think blocks", () => {
+    assert.deepEqual(
+      parseAction('<think>{"action":"send_mon","to":"bad"}</think>{"action":"get_balance"}'),
+      { action: "get_balance" },
+    );
+  });
+
+  it("uses the last valid action JSON", () => {
+    assert.deepEqual(
+      parseAction('{"action":"get_address"} reasoning {"action":"get_balance"}'),
+      { action: "get_balance" },
+    );
+  });
+
+  it("rejects truncated action JSON", () => {
+    assert.deepEqual(parseAction('{"action":"send_mon","to":"0x123'), { action: "none" });
+  });
+
+  it("rejects a write action missing required arguments", () => {
+    assert.deepEqual(parseAction('{"action":"send_mon","amountMon":"0.5"}'), { action: "none" });
+  });
+
   it("JSON inside prose", () => {
     const input = "Here you go: {\"action\":\"send_mon\",\"to\":\"0x000000000000000000000000000000000000dEaD\",\"amountMon\":\"1\"}";
     assert.deepEqual(parseAction(input), {

@@ -9,7 +9,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseAction, describeAction, runAction, ACTIONS } from "../src/tools.mjs";
+import { parseAction, describeAction, runAction, ACTIONS, isWrite } from "../src/tools.mjs";
 import { config } from "../src/config.mjs";
 
 // ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ describe("describeAction — send_token", () => {
 
 describe("isWrite — send_token", () => {
   it("send_token is a write", () => {
-    assert.equal(parseAction('{"action":"send_token"}').action === "send_token" && ACTIONS.send_token !== undefined, true);
+    assert.equal(isWrite("send_token"), true);
   });
 });
 
