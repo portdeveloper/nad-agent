@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describeAction, runAction, resolveSend, isWrite } from "../src/tools.mjs";
+import { describeAction, runAction, resolveSend, isWrite, isRefusal } from "../src/tools.mjs";
 import { resolveRecipient, loadAddressBook } from "../src/addressBook.mjs";
 
 const GOOD = "0x8ba1f109551bD432803012645Ac136ddd64DBA72";
@@ -44,6 +44,16 @@ test("a send without a pre-resolved recipient is refused, not resolved on the fl
   // which no test can load, so it is reachable from here.
   const out = await runAction({ action: "send_mon", to: GOOD, amountMon: "0.01" });
   assert.match(out, /requires a recipient resolved by resolveSend/);
+});
+
+test("isRefusal detects a refusal runAction returns as a string", async () => {
+  // cli.mjs sets hadFailure (and, scripted, the non-zero exit) off this predicate, so a
+  // returned refusal reads as a failure the same way a throw does. cli.mjs can't be loaded
+  // in a test, so the predicate is pinned here against a real refusal: an unresolved send.
+  const refusal = await runAction({ action: "send_mon", to: GOOD, amountMon: "0.01" });
+  assert.ok(isRefusal(refusal), "a returned refusal must be detected");
+  assert.ok(!isRefusal("Sent 0.01 MON"), "normal output is not a refusal");
+  assert.ok(!isRefusal(null) && !isRefusal(undefined), "no output is not a refusal");
 });
 
 test("runAction ignores a recipient smuggled in on the action object", async () => {

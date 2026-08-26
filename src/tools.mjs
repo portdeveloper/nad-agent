@@ -301,6 +301,12 @@ export function isWrite(action) {
   return needsRecipient(action) || action === "swap";
 }
 
+/** True if a runAction result is a refusal. Refusals are returned as strings
+ *  prefixed "Refused:" (see the returns throughout runAction), never thrown. */
+export function isRefusal(out) {
+  return String(out ?? "").startsWith("Refused:");
+}
+
 /** Parse an account index from model output or CLI input.
  *  Accepts: integer number, or decimal string that parses to an integer.
  *  Rejects: booleans, null, undefined, objects, floats with fractional parts,
