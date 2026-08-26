@@ -76,6 +76,9 @@ import {
   isWrite,
   previewSend,
   renderSendPreview,
+  prepareTokenSend,
+  previewTokenSend,
+  renderTokenSendPreview,
   resolveSend,
   parseAccountIndex,
   needsRecipient,
@@ -200,6 +203,7 @@ async function confirm(question) {
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
 async function handleAction(action) {
   let resolved = null;
+  let preparedToken = null;
   let swapPreview = null;
   if (action.action === "none") return false;
   if (isWrite(action.action)) {
@@ -208,13 +212,16 @@ async function handleAction(action) {
       // the address on screen is the address that gets signed, even if the address book changes
       // while the prompt is open. resolveSend covers a book name and a raw address alike, so it
       // replaces the inline checksum step this block used to do.
-      const prep = resolveSend(action, { policy, sessionSpent });
+      const prep = action.action === "send_token"
+        ? await prepareTokenSend(action, { policy, sessionSpent })
+        : resolveSend(action, { policy, sessionSpent });
       if (!prep.ok) {
         println(c.red(`  Refused: ${prep.reason}`) + "\n");
         if (SCRIPTED) hadFailure = true;
         return true;
       }
       resolved = prep.recipient;
+      if (action.action === "send_token") preparedToken = prep;
     }
 
     if (action.action === "swap") {
@@ -267,6 +274,30 @@ async function handleAction(action) {
         println(c.dim("  cancelled.") + "\n");
         return true;
       }
+    } else if (action.action === "send_token") {
+      let preview;
+      try {
+        preview = await previewTokenSend(preparedToken, { policy, sessionSpent });
+      } catch (err) {
+        println(c.red(`  Refused: ${err.message}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      if (!preview.ok) {
+        println(c.red(`  Refused: ${preview.reason}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      const block = renderTokenSendPreview({ ...preview, to: formatRecipient(resolved) });
+      println("\n  " + c.yellow(block.replace(/\n/g, "\n  ")));
+      if (!(await confirmMainnetOnce())) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
+      if (!(await confirm("  confirm?"))) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
     } else {
       println("\n  " + c.yellow(describeAction(action, resolved)));
       if (!(await confirmMainnetOnce())) {
@@ -302,7 +333,7 @@ async function handleAction(action) {
     }
   }
   try {
-    const out = await runAction(action, resolved, swapPreview ? { preview: swapPreview } : {});
+    const out = await runAction(action, resolved, { preparedToken, preview: swapPreview });
     // Only native amounts count against the session budget; token amounts are
     // not denominated in MON, so the policy governs their recipient only. A
     // refusal from runAction must not consume budget, and a dry run does count:
