@@ -32,6 +32,7 @@ config.gasMode = "dry-run";
 // Avoid a highly repetitive address here: the bundled small model can occasionally
 // drop one zero while copying it, which makes the model-driven smoke step flaky.
 const TEST_ADDR = "0x1234567890abcdef1234567890abcdef12345678";
+const TEST_ADDR_CHECKSUM = "0x1234567890AbcdEF1234567890aBcdef12345678";
 const log = (s = "") => console.log(s);
 const indent = (s) => "  " + String(s).replace(/\n/g, "\n  ");
 
@@ -93,7 +94,7 @@ if (!tokenPrep.ok) throw new Error("token send was refused before preview: " + t
 const tokenPreview = await previewTokenSend(tokenPrep);
 if (!tokenPreview.ok) throw new Error("token preview failed: " + tokenPreview.reason);
 const tokenBlock = renderTokenSendPreview(tokenPreview);
-if (!tokenBlock.includes("USDC") || !tokenBlock.includes(TEST_ADDR)) {
+if (!tokenBlock.includes("USDC") || !tokenBlock.includes(TEST_ADDR_CHECKSUM)) {
   throw new Error("token confirmation block is missing the token or resolved recipient");
 }
 log(indent(tokenBlock));

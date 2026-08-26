@@ -345,6 +345,39 @@ describe("previewTokenSend", () => {
     assert.match(block, /WARNING:.*fee quote unavailable/);
   });
 
+  it("explains why a dry-run fee estimate is unavailable", async () => {
+    const previousGasMode = config.gasMode;
+    config.gasMode = "dry-run";
+    try {
+      const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+      const preview = await previewTokenSend(prepared, {
+        getBalance: async () => 10_000_000n,
+        quoteSend: async () => { throw new Error("bundler unavailable"); },
+        simulateSend: async () => ({ simulated: true }),
+      });
+      const block = renderTokenSendPreview(preview);
+
+      assert.match(block, /Fee quote: unavailable \(dry-run has no bundler estimate\)/);
+      assert.match(block, /Simulation: available/);
+    } finally {
+      config.gasMode = previousGasMode;
+    }
+  });
+
+  it("renders a lowercase recipient in checksum form", async () => {
+    const raw = "0x1234567890abcdef1234567890abcdef12345678";
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: raw, amount: "1" });
+    const preview = await previewTokenSend(prepared, {
+      getBalance: async () => 10_000_000n,
+      quoteSend: async () => ({ fee: 0n }),
+      simulateSend: async () => ({ simulated: true }),
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.match(block, /To:\s+0x1234567890AbcdEF1234567890aBcdef12345678/);
+    assert.doesNotMatch(block, new RegExp(`To:\\s+${raw}`));
+  });
+
   it("surfaces a transfer simulation warning before confirmation", async () => {
     const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
     const preview = await previewTokenSend(prepared, {

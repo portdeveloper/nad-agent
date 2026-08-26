@@ -9,7 +9,7 @@
 
 import * as wallet from "./wallet.mjs";
 import { config } from "./config.mjs";
-import { parseMon, formatMon, formatTokenUnits, parseTokenAmount, isAddress } from "./format.mjs";
+import { parseMon, formatMon, formatTokenUnits, parseTokenAmount, isAddress, toChecksumAddress } from "./format.mjs";
 import { listKnownTokenSymbols, resolveToken } from "./tokens.mjs";
 import { resolveRecipient, formatRecipient, safeEcho } from "./addressBook.mjs";
 import { checkPolicy, checkSwapPolicy, describePolicy, describeSwapPolicy } from "./policy.mjs";
@@ -518,13 +518,22 @@ export async function previewTokenSend(
 /** Render the token preview as the confirmation block shown before y/N. */
 export function renderTokenSendPreview(p) {
   const tokenName = p.name && p.name !== p.symbol ? ` (${p.name})` : "";
+  const recipientText = String(p.to ?? "");
+  const addressMatch = recipientText.match(/^(0x[0-9a-fA-F]{40})(.*)$/);
+  const displayedRecipient = addressMatch
+    ? `${toChecksumAddress(addressMatch[1])}${addressMatch[2]}`
+    : recipientText;
   const lines = [
     `Token:    ${p.symbol}${tokenName}`,
     `Contract: ${p.tokenAddress}`,
-    `To:       ${p.to}`,
+    `To:       ${displayedRecipient}`,
     `Amount:   ${p.amount} ${p.symbol}`,
     `Gas:      ${p.gasLabel}` + (p.feeQuoted && p.fee > 0n ? `  (~${formatMon(p.fee)} ${p.nativeSymbol})` : ""),
-    `Fee quote:${p.feeQuoted ? " available (transfer fee quote succeeded)" : " unavailable"}`,
+    `Fee quote:${p.feeQuoted
+      ? " available (transfer fee quote succeeded)"
+      : config.gasMode === "dry-run"
+        ? " unavailable (dry-run has no bundler estimate)"
+        : " unavailable"}`,
     `Simulation:${p.simulated ? " available (transfer call succeeded)" : " unavailable"}`,
     `Balance:  ${formatTokenUnits(p.before, p.decimals)} -> ${formatTokenUnits(p.after, p.decimals)} ${p.symbol}`,
   ];
