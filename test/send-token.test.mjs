@@ -78,7 +78,7 @@ describe("parseAction — send_token", () => {
   });
 
   it("unknown action → none", () => {
-    assert.deepEqual(parseAction('{"action":"swap"}'), { action: "none" });
+    assert.deepEqual(parseAction('{"action":"bridge"}'), { action: "none" });
   });
 });
 

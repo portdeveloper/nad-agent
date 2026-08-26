@@ -19,6 +19,8 @@ import {
   prepareTokenSend,
   previewTokenSend,
   renderTokenSendPreview,
+  buildSwapPreview,
+  lockBestSwap,
 } from "./tools.mjs";
 import { flushSmokeSuccess } from "./smoke-exit.mjs";
 
@@ -99,6 +101,31 @@ if (!tokenSent.includes("0.01") || !tokenSent.includes(TEST_ADDR)) {
   throw new Error("token dry-run receipt is missing the amount or resolved recipient");
 }
 log(indent(tokenSent));
+
+// 2c) Swap quote + dry-run against the live PuddleSwap router (no key, no funds).
+log("\nswap quote + dry-run (PuddleSwap):");
+{
+  const swap = { action: "swap", amountIn: "0.1", tokenIn: "MON", tokenOut: "USDC" };
+  const preview = await buildSwapPreview(swap);
+  if (preview.error) throw new Error("swap preview failed: " + preview.error);
+  if (!preview.routes?.length) throw new Error("swap preview returned no routes");
+  log(indent(preview.block));
+  const locked = await lockBestSwap(preview);
+  if (locked.error) throw new Error(locked.error);
+  const swapped = await runAction(swap, null, { preview: locked });
+  if (typeof swapped === "string" && swapped.startsWith("Refused:")) throw new Error(swapped);
+  if (typeof swapped !== "string" || !swapped.includes("DRY RUN")) {
+    throw new Error("expected a dry-run swap receipt, got: " + swapped);
+  }
+  log(indent(swapped));
+}
+
+log("\nNL › \"swap 0.1 MON for USDC\" (phrase parser, no model)");
+{
+  const parsed = parseAction("swap 0.1 MON for USDC");
+  log("  parsed:       " + JSON.stringify(parsed));
+  if (parsed.action !== "swap") throw new Error("expected swap phrase to parse, got " + JSON.stringify(parsed));
+}
 
 // 3) Local model: natural language -> action -> execute
 log("\nloading local model…");

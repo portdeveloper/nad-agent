@@ -9,7 +9,7 @@
  * wallet is actually needed (and so the doctor/help paths work without it).
  */
 
-import { Contract, JsonRpcProvider, getAddress as checksumAddress, Interface, ZeroAddress } from "ethers";
+import { Contract, JsonRpcProvider, getAddress as checksumAddress } from "ethers";
 import { config, setAccountIndex } from "./config.mjs";
 
 let manager = null;
@@ -24,11 +24,43 @@ const ERC20_ABI = [
   "function symbol() view returns (string)",
   "function name() view returns (string)",
   "function transfer(address to, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+];
+
+const ERC721_ABI = [
+  "function balanceOf(address owner) view returns (uint256)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function tokenURI(uint256 tokenId) view returns (string)",
+  "function safeTransferFrom(address from, address to, uint256 tokenId)",
+  "function approve(address to, uint256 tokenId)",
+  "function getApproved(uint256 tokenId) view returns (address)",
+  "function isApprovedForAll(address owner, address operator) view returns (bool)",
+  "function setApprovalForAll(address operator, bool approved)",
 ];
 
 function getReadProvider() {
   if (!readProvider) readProvider = new JsonRpcProvider(config.chain.rpcUrl, config.chain.chainId);
   return readProvider;
+}
+
+/**
+ * GET a path from the Reservoir indexer (see config.reservoirUrl).
+ *
+ * get_nfts goes through Reservoir instead of raw eth_getLogs/Transfer-event scanning:
+ * Monad prunes historical state, so an on-chain scan of past transfers is unreliable
+ * (this is why the explorer is the source of truth for holdings). Reservoir is the only
+ * new network dependency; nothing else about the wallet changes.
+ */
+async function fetchReservoir(path) {
+  if (!config.reservoirApiKey) {
+    throw new Error("RESERVOIR_API_KEY is not set. Get a free key at https://reservoir.tools, then put it in .env");
+  }
+  const res = await fetch(`${config.reservoirUrl}${path}`, { headers: { "x-api-key": config.reservoirApiKey } });
+  if (!res.ok) {
+    throw new Error(`Reservoir API error ${res.status}${res.statusText ? ` ${res.statusText}` : ""} for ${path}`);
+  }
+  return res.json();
 }
 
 function buildWalletConfig() {
@@ -122,6 +154,58 @@ export async function listAccounts(count = 5) {
   return accounts;
 }
 
+export function normalizeHistoryTransaction(tx, ownerAddress = address) {
+  if (!tx || !ownerAddress) return null;
+  const owner = String(ownerAddress).toLowerCase();
+  const fromAddress = tx.from?.hash ?? tx.from;
+  const toAddress = tx.to?.hash ?? tx.to;
+  const from = String(fromAddress ?? "").toLowerCase();
+  const to = String(toAddress ?? "").toLowerCase();
+  if (from !== owner && to !== owner) return null;
+  const direction = from === owner ? "out" : "in";
+  const amount = BigInt(tx.value ?? 0);
+  const hash = tx.hash ?? tx.transaction_hash ?? tx.transactionHash;
+  if (!hash) return null;
+  return {
+    hash,
+    direction,
+    amount,
+    timestamp: tx.timestamp ?? null,
+    explorerUrl: `${config.chain.explorerUrl}/tx/${hash}`,
+  };
+}
+
+async function fetchExplorerItems(path, fetchImpl) {
+  const res = await fetchImpl(`${config.chain.explorerUrl}${path}`, {
+    headers: { accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`MonadScan API error ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data?.items ?? []);
+}
+
+/** Read recent native transfers involving the smart account from MonadScan. */
+export async function getHistory({ limit = 10, ownerAddress = address, fetchImpl = fetch } = {}) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const cap = Math.max(1, Math.min(Number(limit) || 10, 50));
+  const owner = checksumAddress(ownerAddress);
+  const encoded = encodeURIComponent(owner);
+  const results = await Promise.allSettled([
+    fetchExplorerItems(`/api/v2/addresses/${encoded}/transactions`, fetchImpl),
+    fetchExplorerItems(`/api/v2/addresses/${encoded}/internal-transactions`, fetchImpl),
+  ]);
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  if (!fulfilled.length) {
+    throw results[0].reason;
+  }
+  const entries = fulfilled
+    .flatMap((result) => result.value)
+    .map((tx) => normalizeHistoryTransaction(tx, owner))
+    .filter(Boolean)
+    .sort((a, b) => String(b.timestamp ?? "").localeCompare(String(a.timestamp ?? "")));
+  return entries.slice(0, cap);
+}
+
 export async function getBalance() {
   if (!account) throw new Error("Wallet not initialized");
   return account.getBalance(); // bigint wei
@@ -131,6 +215,12 @@ export async function getTokenBalance(tokenAddress, ownerAddress = address) {
   if (!ownerAddress) throw new Error("Wallet not initialized");
   const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
   return BigInt(await token.balanceOf(checksumAddress(ownerAddress)));
+}
+
+export async function getAllowance(tokenAddress, spender, ownerAddress = address) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
+  return BigInt(await token.allowance(checksumAddress(ownerAddress), checksumAddress(spender)));
 }
 
 export async function getTokenMetadata(tokenAddress) {
@@ -160,6 +250,66 @@ export async function quoteTokenSend(to, tokenAddress, amountWei) {
     throw new Error("token transfer quote is unavailable");
   }
   return account.quoteTransfer({ token: tokenAddress, recipient: to, amount: amountWei });
+}
+
+/**
+ * Owned ERC-721 tokens for an address (defaults to the agent's wallet).
+ *
+ * Reads come from the Reservoir indexer, not eth_getLogs — see fetchReservoir.
+ * Returns [{ contract, tokenId, name? }], one entry per token, tokenId as a string.
+ */
+export async function getNfts(ownerAddress = address) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const owner = checksumAddress(ownerAddress);
+  const data = await fetchReservoir(`/users/${owner}/tokens/v7?limit=100`);
+  // Known follow-up: page past 100 via the `continuation` field for wallets with more.
+  return (data?.tokens ?? []).map((entry) => {
+    const t = entry?.token ?? {};
+    return {
+      contract: checksumAddress(t.contract),
+      tokenId: String(t.tokenId),
+      ...(t.name ? { name: String(t.name) } : {}),
+    };
+  });
+}
+
+/**
+ * Broadcast (or, in dry-run, simulate) an ERC-721 transfer via safeTransferFrom.
+ *
+ * Verifies `fromAddress` actually owns the token first — a wrong owner is refused
+ * before anything is signed. `fromAddress` defaults to the agent's own wallet and
+ * only needs to differ when the agent holds an approval for someone else's NFT.
+ * Returns { dryRun } | { userOpHash, hash, fee }.
+ */
+export async function transferNft(to, contractAddress, tokenId, fromAddress = address) {
+  if (!account) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(contractAddress), ERC721_ABI, getReadProvider());
+  const owner = checksumAddress(await token.ownerOf(BigInt(tokenId)));
+  if (owner.toLowerCase() !== checksumAddress(fromAddress).toLowerCase()) {
+    throw new Error(
+      `Refused: ${fromAddress} does not own token #${tokenId} on ${contractAddress} — owner is ${owner}`,
+    );
+  }
+  const data = new Interface(ERC721_ABI).encodeFunctionData("safeTransferFrom", [
+    checksumAddress(fromAddress),
+    checksumAddress(to),
+    BigInt(tokenId),
+  ]);
+  const target = checksumAddress(contractAddress);
+  if (config.gasMode === "dry-run") {
+    let fee = 0n;
+    try {
+      const q = await account.quoteSendTransaction({ to: target, value: 0n, data });
+      fee = BigInt(q?.fee ?? 0);
+    } catch {
+      /* estimation may need a bundler; ignore in dry-run */
+    }
+    return { dryRun: true, to, contract: target, tokenId, fee };
+  }
+  const res = await account.sendTransaction({ to: target, value: 0n, data });
+  const userOpHash = res.hash;
+  const hash = await waitForUserOpTxHash(userOpHash);
+  return { userOpHash, hash, fee: BigInt(res.fee ?? 0) };
 }
 
 /**
@@ -205,6 +355,36 @@ export async function sendToken(to, tokenAddress, amountWei) {
   const userOpHash = res.hash;
   const hash = await waitForUserOpTxHash(userOpHash);
   return { userOpHash, hash, fee: BigInt(res.fee ?? 0) };
+}
+
+/**
+ * Broadcast (or, in dry-run, simulate) one or more contract calls as a single
+ * UserOperation. An array is atomic: approve + swap land together or not at all.
+ * Returns { dryRun, calls, fee } | { userOpHash, hash, fee, calls }.
+ */
+export async function sendCalls(calls) {
+  if (!account) throw new Error("Wallet not initialized");
+  if (!Array.isArray(calls) || calls.length === 0) {
+    throw new Error("No calls to send");
+  }
+  if (config.gasMode === "dry-run") {
+    try {
+      const q = await account.quoteSendTransaction(calls);
+      return { dryRun: true, calls, fee: BigInt(q?.fee ?? 0), simulated: true };
+    } catch (err) {
+      const msg = String(err?.shortMessage || err?.info?.error?.message || err?.message || err);
+      // Reverts and bad calldata must not look like a successful dry-run.
+      // A missing bundler / network blip is not a simulation of the calls.
+      if (/revert|call exception|AA2\d|UserOperation|invalid opcode|execution reverted/i.test(msg)) {
+        throw new Error(`dry-run simulation rejected the calls: ${msg}`);
+      }
+      return { dryRun: true, calls, fee: 0n, simulated: false };
+    }
+  }
+  const res = await account.sendTransaction(calls);
+  const userOpHash = res.hash;
+  const hash = await waitForUserOpTxHash(userOpHash);
+  return { userOpHash, hash, fee: BigInt(res.fee ?? 0), calls };
 }
 
 /** Poll the bundler for the UserOperation receipt; return the on-chain tx hash (or null). */
