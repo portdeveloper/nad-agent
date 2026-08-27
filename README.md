@@ -25,7 +25,7 @@ Talk to it in plain English (or use the slash-commands) and it drives a real wal
 - **`what's my address?`** → the agent's smart-account address
 - **`what's my balance?`** → live MON balance, read from Monad
 - **`what's my USDC balance?`** → ERC-20 balance read by known testnet symbol or token address
-- **`what NFTs do I own?`** → ERC-721 list for the wallet, read from the Reservoir indexer (set `RESERVOIR_API_KEY`)
+- **`what NFTs do I own?`** → ERC-721 list for the wallet, read from the Reservoir indexer (set `RESERVOIR_API_KEY`; testnet only — Reservoir doesn't index Monad mainnet, so on mainnet this is refused unless `RESERVOIR_API_URL` names an indexer)
 - **`send 0.1 MON to 0x…`** → asks you to confirm, then broadcasts a **gasless** transfer (the wallet pays 0 gas) and returns the on-chain tx hash + explorer link
 - **`send 0.1 MON to alice`** → resolves the name through your local address book and shows the address it resolved to *before* you confirm
 - **`send NFT #12 to alice`** → ownership-checked ERC-721 `safeTransferFrom`, gasless (or dry-run)

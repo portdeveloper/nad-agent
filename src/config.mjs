@@ -19,6 +19,7 @@ const NETWORKS = {
     rpcUrl: "https://testnet-rpc.monad.xyz",
     explorerUrl: "https://testnet.monadscan.com",
     symbol: "MON",
+    reservoirUrl: "https://api-monad-testnet.reservoir.tools",
   },
   mainnet: {
     chainId: 143,
@@ -26,22 +27,30 @@ const NETWORKS = {
     rpcUrl: "https://rpc.monad.xyz",
     explorerUrl: "https://monadscan.com",
     symbol: "MON",
+    // Reservoir publishes no Monad *mainnet* host — only the testnet one above. There is
+    // therefore no safe default here: falling back to the testnet host would list holdings
+    // from another chain under a mainnet banner, and the wallet address is identical on
+    // both, so the answer looks plausible. Empty means get_nfts refuses on mainnet until
+    // RESERVOIR_API_URL names an indexer for this network (see fetchReservoir).
+    reservoirUrl: "",
   },
 };
 
 const network = process.env.MONAD_NETWORK === "mainnet" ? "mainnet" : "testnet";
 const chain = { network, ...NETWORKS[network] };
 if (process.env.MONAD_RPC_URL) chain.rpcUrl = process.env.MONAD_RPC_URL;
+if (process.env.RESERVOIR_API_URL) chain.reservoirUrl = process.env.RESERVOIR_API_URL;
 
 const pimlicoKey = process.env.PIMLICO_API_KEY || "";
 const sponsorshipPolicyId = process.env.PIMLICO_SPONSORSHIP_POLICY_ID || "";
 const gasOverride = (process.env.WDK_GAS_MODE || "").toLowerCase();
 
 // NFT reads (get_nfts) go through Reservoir's indexed API, not raw eth_getLogs:
-// Monad prunes historical state, so Transfer-event scanning is unreliable. The
-// default is Monad testnet; override the base URL for mainnet or a different indexer.
+// Monad prunes historical state, so Transfer-event scanning is unreliable. The host
+// follows MONAD_NETWORK through the NETWORKS table above, like rpcUrl and explorerUrl;
+// RESERVOIR_API_URL overrides it (and is the only way to enable get_nfts on mainnet).
 const reservoirApiKey = process.env.RESERVOIR_API_KEY || "";
-const reservoirUrl = process.env.RESERVOIR_API_URL || "https://api-monad-testnet.reservoir.tools";
+const reservoirUrl = chain.reservoirUrl;
 
 // Resolve the effective gas mode:
 //   dry-run   -> simulate sends (no bundler needed). Auto-selected when no Pimlico key.
