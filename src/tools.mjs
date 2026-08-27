@@ -219,9 +219,26 @@ function tokenInput(a) {
   return a.token ?? a.tokenSymbol ?? a.tokenAddress ?? a.symbol ?? "";
 }
 
-function knownTokenHint() {
+function tokenCatalogStatus() {
   const known = listKnownTokenSymbols();
-  return known.length ? ` Known ${config.chain.network} symbols: ${known.join(", ")}.` : "";
+  if (!known.length) {
+    return {
+      hasEntries: false,
+      hint: `No built-in token symbols are configured for ${config.chain.name}.`,
+    };
+  }
+  return {
+    hasEntries: true,
+    hint: `Known ${config.chain.network} symbols: ${known.join(", ")}.`,
+  };
+}
+
+function unknownTokenMessage(input) {
+  const catalog = tokenCatalogStatus();
+  if (!catalog.hasEntries) {
+    return `${catalog.hint} Use a token contract address.`;
+  }
+  return `Unknown token "${safeEcho(input)}" on ${config.chain.name}. Use a token contract address. ${catalog.hint}`;
 }
 
 /**
@@ -259,10 +276,7 @@ export async function prepareTokenSend(
     return { ok: false, reason: `invalid token "${safeEcho(input)}": ${safeEcho(detail)}` };
   }
   if (!token) {
-    return {
-      ok: false,
-      reason: `unknown token "${safeEcho(input)}" on ${config.chain.name}. Use a token contract address.${knownTokenHint()}`,
-    };
+    return { ok: false, reason: unknownTokenMessage(input) };
   }
 
   let prepared = token;
@@ -795,9 +809,7 @@ export async function runAction(a, resolved, opts = {}) {
       }
       const token = resolveToken(input);
       if (!token) {
-        const known = listKnownTokenSymbols();
-        const hint = known.length ? ` Known ${config.chain.network} symbols: ${known.join(", ")}.` : "";
-        return `Unknown token "${String(input).trim()}" on ${config.chain.name}. Use a token contract address.${hint}`;
+        return unknownTokenMessage(input);
       }
 
       let { symbol, decimals, name } = token;
