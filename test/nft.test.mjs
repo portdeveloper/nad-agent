@@ -228,6 +228,23 @@ describe("normalizeNftPage — one bad row must not discard the response", () =>
     assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "42" }]);
   });
 
+  it("keeps tokenId 0, which is valid and falsy", () => {
+    // The reason the guard tests for undefined/null/empty rather than falsiness: token id 0
+    // is a real id, and a truthiness check would silently drop it.
+    const { tokens, skipped } = normalizeNftPage({ tokens: [{ token: { contract: CONTRACT_A, tokenId: 0 } }] });
+    assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "0" }]);
+    assert.equal(skipped, 0);
+  });
+
+  it("drops a malformed name instead of rendering [object Object]", () => {
+    // Same shape as the tokenId problem, one step quieter: String({}) reaches the operator's
+    // list as "[object Object]". The name is decoration, so the token survives without it.
+    const { tokens } = normalizeNftPage({
+      tokens: [{ token: { contract: CONTRACT_A, tokenId: "1", name: { evil: true } } }],
+    });
+    assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "1" }]);
+  });
+
   it("checksums the contract rather than passing the indexer's casing through", () => {
     const { tokens } = normalizeNftPage({ tokens: [{ token: { contract: CONTRACT_A.toLowerCase(), tokenId: "1" } }] });
     assert.equal(tokens[0].contract, CONTRACT_A);
