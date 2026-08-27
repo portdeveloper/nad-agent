@@ -19,6 +19,7 @@ const NETWORKS = {
     rpcUrl: "https://testnet-rpc.monad.xyz",
     explorerUrl: "https://testnet.monadscan.com",
     symbol: "MON",
+    reservoirUrl: "https://api-monad-testnet.reservoir.tools",
     // PuddleSwap — portdeveloper's Uniswap-V2 DEX on this testnet (RPC-only).
     // Addresses from https://github.com/portdeveloper/puddleswap (config/addresses/10143.json).
     // WMON here is PuddleSwap's wrap (pools live against it), which is NOT the
@@ -42,22 +43,29 @@ const NETWORKS = {
     explorerUrl: "https://monadscan.com",
     symbol: "MON",
     dex: null, // no vetted mainnet DEX pinned — the swap action refuses here
+    // Same rule for NFT reads: Reservoir publishes no Monad *mainnet* host, and falling
+    // back to the testnet one would list another chain's holdings under a mainnet banner
+    // — the wallet address is identical on both, so the answer looks plausible. Empty
+    // means get_nfts refuses until RESERVOIR_API_URL names an indexer (see fetchReservoir).
+    reservoirUrl: "",
   },
 };
 
 const network = process.env.MONAD_NETWORK === "mainnet" ? "mainnet" : "testnet";
 const chain = { network, ...NETWORKS[network] };
 if (process.env.MONAD_RPC_URL) chain.rpcUrl = process.env.MONAD_RPC_URL;
+if (process.env.RESERVOIR_API_URL) chain.reservoirUrl = process.env.RESERVOIR_API_URL;
 
 const pimlicoKey = process.env.PIMLICO_API_KEY || "";
 const sponsorshipPolicyId = process.env.PIMLICO_SPONSORSHIP_POLICY_ID || "";
 const gasOverride = (process.env.WDK_GAS_MODE || "").toLowerCase();
 
 // NFT reads (get_nfts) go through Reservoir's indexed API, not raw eth_getLogs:
-// Monad prunes historical state, so Transfer-event scanning is unreliable. The
-// default is Monad testnet; override the base URL for mainnet or a different indexer.
+// Monad prunes historical state, so Transfer-event scanning is unreliable. The host
+// follows MONAD_NETWORK through the NETWORKS table above, like rpcUrl and explorerUrl;
+// RESERVOIR_API_URL overrides it (and is the only way to enable get_nfts on mainnet).
 const reservoirApiKey = process.env.RESERVOIR_API_KEY || "";
-const reservoirUrl = process.env.RESERVOIR_API_URL || "https://api-monad-testnet.reservoir.tools";
+const reservoirUrl = chain.reservoirUrl;
 
 // Resolve the effective gas mode:
 //   dry-run   -> simulate sends (no bundler needed). Auto-selected when no Pimlico key.
