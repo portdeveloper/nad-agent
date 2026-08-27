@@ -9,7 +9,7 @@
  * wallet is actually needed (and so the doctor/help paths work without it).
  */
 
-import { Contract, JsonRpcProvider, getAddress as checksumAddress, Interface, ZeroAddress } from "ethers";
+import { Contract, JsonRpcProvider, getAddress as checksumAddress } from "ethers";
 import { config, setAccountIndex } from "./config.mjs";
 
 let manager = null;
@@ -24,6 +24,8 @@ const ERC20_ABI = [
   "function symbol() view returns (string)",
   "function name() view returns (string)",
   "function transfer(address to, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
 ];
 
 const ERC721_ABI = [
@@ -164,6 +166,58 @@ export async function listAccounts(count = 5) {
   return accounts;
 }
 
+export function normalizeHistoryTransaction(tx, ownerAddress = address) {
+  if (!tx || !ownerAddress) return null;
+  const owner = String(ownerAddress).toLowerCase();
+  const fromAddress = tx.from?.hash ?? tx.from;
+  const toAddress = tx.to?.hash ?? tx.to;
+  const from = String(fromAddress ?? "").toLowerCase();
+  const to = String(toAddress ?? "").toLowerCase();
+  if (from !== owner && to !== owner) return null;
+  const direction = from === owner ? "out" : "in";
+  const amount = BigInt(tx.value ?? 0);
+  const hash = tx.hash ?? tx.transaction_hash ?? tx.transactionHash;
+  if (!hash) return null;
+  return {
+    hash,
+    direction,
+    amount,
+    timestamp: tx.timestamp ?? null,
+    explorerUrl: `${config.chain.explorerUrl}/tx/${hash}`,
+  };
+}
+
+async function fetchExplorerItems(path, fetchImpl) {
+  const res = await fetchImpl(`${config.chain.explorerUrl}${path}`, {
+    headers: { accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`MonadScan API error ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data?.items ?? []);
+}
+
+/** Read recent native transfers involving the smart account from MonadScan. */
+export async function getHistory({ limit = 10, ownerAddress = address, fetchImpl = fetch } = {}) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const cap = Math.max(1, Math.min(Number(limit) || 10, 50));
+  const owner = checksumAddress(ownerAddress);
+  const encoded = encodeURIComponent(owner);
+  const results = await Promise.allSettled([
+    fetchExplorerItems(`/api/v2/addresses/${encoded}/transactions`, fetchImpl),
+    fetchExplorerItems(`/api/v2/addresses/${encoded}/internal-transactions`, fetchImpl),
+  ]);
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  if (!fulfilled.length) {
+    throw results[0].reason;
+  }
+  const entries = fulfilled
+    .flatMap((result) => result.value)
+    .map((tx) => normalizeHistoryTransaction(tx, owner))
+    .filter(Boolean)
+    .sort((a, b) => String(b.timestamp ?? "").localeCompare(String(a.timestamp ?? "")));
+  return entries.slice(0, cap);
+}
+
 export async function getBalance() {
   if (!account) throw new Error("Wallet not initialized");
   return account.getBalance(); // bigint wei
@@ -173,6 +227,12 @@ export async function getTokenBalance(tokenAddress, ownerAddress = address) {
   if (!ownerAddress) throw new Error("Wallet not initialized");
   const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
   return BigInt(await token.balanceOf(checksumAddress(ownerAddress)));
+}
+
+export async function getAllowance(tokenAddress, spender, ownerAddress = address) {
+  if (!ownerAddress) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
+  return BigInt(await token.allowance(checksumAddress(ownerAddress), checksumAddress(spender)));
 }
 
 export async function getTokenMetadata(tokenAddress) {
@@ -194,6 +254,32 @@ export async function getTokenMetadata(tokenAddress) {
 export async function quoteSend(to, valueWei) {
   if (!account) throw new Error("Wallet not initialized");
   return account.quoteSendTransaction({ to, value: valueWei });
+}
+
+export async function quoteTokenSend(to, tokenAddress, amountWei) {
+  if (!account) throw new Error("Wallet not initialized");
+  if (typeof account.quoteTransfer !== "function") {
+    throw new Error("token transfer quote is unavailable");
+  }
+  return account.quoteTransfer({ token: tokenAddress, recipient: to, amount: amountWei });
+}
+
+/**
+ * Simulate the ERC-20 call that the smart account will execute.
+ *
+ * This is deliberately separate from quoteTransfer(): sponsored WDK quotes can return a
+ * zero fee without estimating or executing the transfer. An eth_call against the token with
+ * the smart-account address as `from` exercises the same ERC-20 balance/recipient checks in
+ * both dry-run and gasless modes, without broadcasting or requiring a paymaster round-trip.
+ */
+export async function simulateTokenSend(to, tokenAddress, amountWei) {
+  if (!account || !address) throw new Error("Wallet not initialized");
+  const token = new Contract(checksumAddress(tokenAddress), ERC20_ABI, getReadProvider());
+  const result = await token.transfer.staticCall(checksumAddress(to), amountWei, {
+    from: checksumAddress(address),
+  });
+  if (result === false) throw new Error("token transfer returned false");
+  return { simulated: true };
 }
 
 /**
@@ -299,6 +385,36 @@ export async function sendToken(to, tokenAddress, amountWei) {
   const userOpHash = res.hash;
   const hash = await waitForUserOpTxHash(userOpHash);
   return { userOpHash, hash, fee: BigInt(res.fee ?? 0) };
+}
+
+/**
+ * Broadcast (or, in dry-run, simulate) one or more contract calls as a single
+ * UserOperation. An array is atomic: approve + swap land together or not at all.
+ * Returns { dryRun, calls, fee } | { userOpHash, hash, fee, calls }.
+ */
+export async function sendCalls(calls) {
+  if (!account) throw new Error("Wallet not initialized");
+  if (!Array.isArray(calls) || calls.length === 0) {
+    throw new Error("No calls to send");
+  }
+  if (config.gasMode === "dry-run") {
+    try {
+      const q = await account.quoteSendTransaction(calls);
+      return { dryRun: true, calls, fee: BigInt(q?.fee ?? 0), simulated: true };
+    } catch (err) {
+      const msg = String(err?.shortMessage || err?.info?.error?.message || err?.message || err);
+      // Reverts and bad calldata must not look like a successful dry-run.
+      // A missing bundler / network blip is not a simulation of the calls.
+      if (/revert|call exception|AA2\d|UserOperation|invalid opcode|execution reverted/i.test(msg)) {
+        throw new Error(`dry-run simulation rejected the calls: ${msg}`);
+      }
+      return { dryRun: true, calls, fee: 0n, simulated: false };
+    }
+  }
+  const res = await account.sendTransaction(calls);
+  const userOpHash = res.hash;
+  const hash = await waitForUserOpTxHash(userOpHash);
+  return { userOpHash, hash, fee: BigInt(res.fee ?? 0), calls };
 }
 
 /** Poll the bundler for the UserOperation receipt; return the on-chain tx hash (or null). */

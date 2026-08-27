@@ -7,7 +7,10 @@
  * Reliable slash-commands bypass the model entirely:
  *   /address           show the agent's wallet address
  *   /balance [token]   show native MON or ERC-20 token balance
+ *   /history           show recent MON transactions
  *   /send <to> <mon>   send MON (asks for confirmation)
+ *   /swap <amt> <in> <out>  swap tokens on PuddleSwap (asks for confirmation)
+ *   /account [index]   list or switch derived account
  *   /config /help /exit
  */
 
@@ -59,7 +62,7 @@ const println = (...a) => (SCRIPTED ? console.error(...a) : console.log(...a));
 const printw = (s) => (SCRIPTED ? process.stderr.write(s) : process.stdout.write(s));
 
 import { config } from "./config.mjs";
-import { parseMon } from "./format.mjs";
+import { formatMon, parseMon } from "./format.mjs";
 import { loadPolicy, hasRules } from "./policy.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
@@ -73,8 +76,14 @@ import {
   isWrite,
   previewSend,
   renderSendPreview,
+  prepareTokenSend,
+  previewTokenSend,
+  renderTokenSendPreview,
   resolveSend,
   parseAccountIndex,
+  needsRecipient,
+  buildSwapPreview,
+  lockBestSwap,
 } from "./tools.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
@@ -194,20 +203,57 @@ async function confirm(question) {
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
 async function handleAction(action) {
   let resolved = null;
+  let preparedToken = null;
+  let swapPreview = null;
   if (action.action === "none") return false;
   if (isWrite(action.action)) {
-    // Resolve the recipient ONCE, before anything is shown, and hold it for the whole flow:
-    // the address on screen is the address that gets signed, even if the address book changes
-    // while the prompt is open. resolveSend covers a book name and a raw address alike, so it
-    // replaces the inline checksum step this block used to do.
-    const prep = resolveSend(action, { policy, sessionSpent });
-    if (!prep.ok) {
-      println(c.red(`  Refused: ${prep.reason}`) + "\n");
-      if (SCRIPTED) hadFailure = true;
-      return true;
+    if (needsRecipient(action.action)) {
+      // Resolve the recipient ONCE, before anything is shown, and hold it for the whole flow:
+      // the address on screen is the address that gets signed, even if the address book changes
+      // while the prompt is open. resolveSend covers a book name and a raw address alike, so it
+      // replaces the inline checksum step this block used to do.
+      const prep = action.action === "send_token"
+        ? await prepareTokenSend(action, { policy, sessionSpent })
+        : resolveSend(action, { policy, sessionSpent });
+      if (!prep.ok) {
+        println(c.red(`  Refused: ${prep.reason}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      resolved = prep.recipient;
+      if (action.action === "send_token") preparedToken = prep;
     }
-    resolved = prep.recipient;
-    if (action.action === "send_mon") {
+
+    if (action.action === "swap") {
+      let preview;
+      try {
+        preview = await buildSwapPreview(action, { policy, sessionSpent });
+      } catch (err) {
+        println(c.red(`  Refused: ${err.message}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      if (preview.error) {
+        println(c.red(`  Refused: ${preview.error}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      println("\n  " + c.yellow(preview.block.replace(/\n/g, "\n  ")));
+      if (!(await confirmMainnetOnce())) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
+      if (!(await confirm("  confirm?"))) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
+      swapPreview = await lockBestSwap(preview);
+      if (swapPreview.error) {
+        println(c.red(`  Refused: ${swapPreview.error}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+    } else if (action.action === "send_mon") {
       let preview;
       try {
         preview = await previewSend(action, resolved.address, { policy, sessionSpent });
@@ -220,16 +266,48 @@ async function handleAction(action) {
       // approves the same thing the book produced.
       const block = renderSendPreview({ ...preview, to: formatRecipient(resolved) });
       println("\n  " + c.yellow(block.replace(/\n/g, "\n  ")));
+      if (!(await confirmMainnetOnce())) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
+      if (!(await confirm("  confirm?"))) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
+    } else if (action.action === "send_token") {
+      let preview;
+      try {
+        preview = await previewTokenSend(preparedToken, { policy, sessionSpent });
+      } catch (err) {
+        println(c.red(`  Refused: ${err.message}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      if (!preview.ok) {
+        println(c.red(`  Refused: ${preview.reason}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      const block = renderTokenSendPreview({ ...preview, to: formatRecipient(resolved) });
+      println("\n  " + c.yellow(block.replace(/\n/g, "\n  ")));
+      if (!(await confirmMainnetOnce())) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
+      if (!(await confirm("  confirm?"))) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
     } else {
       println("\n  " + c.yellow(describeAction(action, resolved)));
-    }
-    if (!(await confirmMainnetOnce())) {
-      println(c.dim("  cancelled.") + "\n");
-      return true;
-    }
-    if (!(await confirm("  confirm?"))) {
-      println(c.dim("  cancelled.") + "\n");
-      return true;
+      if (!(await confirmMainnetOnce())) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
+      if (!(await confirm("  confirm?"))) {
+        println(c.dim("  cancelled.") + "\n");
+        return true;
+      }
     }
   }
   // Account switch requires explicit confirmation (no on-chain recipient to resolve,
@@ -255,13 +333,16 @@ async function handleAction(action) {
     }
   }
   try {
-    const out = await runAction(action, resolved);
+    const out = await runAction(action, resolved, { preparedToken, preview: swapPreview });
     // Only native amounts count against the session budget; token amounts are
     // not denominated in MON, so the policy governs their recipient only. A
     // refusal from runAction must not consume budget, and a dry run does count:
     // the budget bounds what the agent attempts, not only what settles.
     if (action.action === "send_mon" && resolved && !String(out ?? "").startsWith("Refused:")) {
       sessionSpent += parseMon(action.amountMon);
+    }
+    if (action.action === "swap" && swapPreview?.nativeIn && !String(out ?? "").startsWith("Refused:")) {
+      sessionSpent += parseMon(action.amountIn);
     }
     if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
   } catch (err) {
@@ -280,6 +361,31 @@ async function handleSlash(line) {
       return rest.length
         ? handleAction({ action: "get_token_balance", token: rest.join(" ") })
         : handleAction({ action: "get_balance" });
+    case "history": {
+      if (rest.length) {
+        println(c.dim("  usage: /history") + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      try {
+        const entries = await wallet.getHistory();
+        if (!entries.length) {
+          println("  no recent transactions found.\n");
+          return true;
+        }
+        println("  " + c.violet(c.bold("recent transactions")));
+        for (const tx of entries) {
+          const sign = tx.direction === "out" ? "-" : "+";
+          println(`  ${tx.direction.padEnd(3)} ${sign}${formatMon(tx.amount)} ${config.chain.symbol}  ${tx.hash}` +
+            (tx.explorerUrl ? `\n       ${tx.explorerUrl}` : ""));
+        }
+        println("");
+      } catch (err) {
+        println(c.red(`  history error: ${err.message}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+      }
+      return true;
+    }
     case "send":
       // Wrong arity gets the usage line, not a confusing refusal about
       // "undefined" being a bad address. Scripted mode still counts it as a
@@ -295,6 +401,8 @@ async function handleSlash(line) {
       return handleAction({ action: "send_mon", to: rest[0], amountMon: rest[1] });
     case "account":
       return handleAction({ action: "account", index: rest[0] ?? undefined });
+    case "swap":
+      return handleAction({ action: "swap", amountIn: rest[0], tokenIn: rest[1], tokenOut: rest[2] });
     case "config":
       statusBlock();
       console.log("");
@@ -304,10 +412,12 @@ async function handleSlash(line) {
         "\n  " + c.violet(c.bold("commands")) + "\n" +
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance [token]") + c.dim("   native MON or ERC-20 balance") + "\n" +
+          "  " + c.cyan("/history") + c.dim("           recent MON transactions") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
           "  " + c.cyan("/account [index]") + c.dim("   list / switch derived account") + "\n" +
+          "  " + c.cyan("/swap <amt> <in> <out>") + c.dim("  swap tokens on PuddleSwap") + "\n" +
           "  " + c.cyan("/config") + c.dim("  ·  ") + c.cyan("/help") + c.dim("  ·  ") + c.cyan("/exit") + "\n\n" +
-          "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"send 0.1 MON to 0x…"') + "\n"
+          "  " + c.dim("or just talk — ") + c.qvac("QVAC") + c.dim(" turns it into an action: ") + c.gray('"swap 0.1 MON for USDC"') + "\n"
       );
       return true;
     case "exit":

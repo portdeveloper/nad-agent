@@ -20,6 +20,21 @@ const NETWORKS = {
     explorerUrl: "https://testnet.monadscan.com",
     symbol: "MON",
     reservoirUrl: "https://api-monad-testnet.reservoir.tools",
+    // PuddleSwap — portdeveloper's Uniswap-V2 DEX on this testnet (RPC-only).
+    // Addresses from https://github.com/portdeveloper/puddleswap (config/addresses/10143.json).
+    // WMON here is PuddleSwap's wrap (pools live against it), which is NOT the
+    // canonical testnet WMON used for balance reads in tokens.mjs.
+    dex: {
+      name: "PuddleSwap",
+      router: "0x430c23895c8D44883526e3E0B09327dAD8766660",
+      wrappedNative: "0x97B3070F9Da6C002343862b35E68Bd8e22608943",
+      canonicalWrappedNative: "0xFb8bf4c1CC7a94c73D209a149eA2AbEa852BC541",
+      tokens: [
+        { symbol: "WMON", address: "0x97B3070F9Da6C002343862b35E68Bd8e22608943", decimals: 18 },
+        { symbol: "USDC", address: "0x534b2f3A21130d7a60830c2Df862319e593943A3", decimals: 6 },
+        { symbol: "USDT", address: "0x1314b22df27BDcD4F8D11a0f4185943e55748917", decimals: 6 },
+      ],
+    },
   },
   mainnet: {
     chainId: 143,
@@ -27,11 +42,11 @@ const NETWORKS = {
     rpcUrl: "https://rpc.monad.xyz",
     explorerUrl: "https://monadscan.com",
     symbol: "MON",
-    // Reservoir publishes no Monad *mainnet* host — only the testnet one above. There is
-    // therefore no safe default here: falling back to the testnet host would list holdings
-    // from another chain under a mainnet banner, and the wallet address is identical on
-    // both, so the answer looks plausible. Empty means get_nfts refuses on mainnet until
-    // RESERVOIR_API_URL names an indexer for this network (see fetchReservoir).
+    dex: null, // no vetted mainnet DEX pinned — the swap action refuses here
+    // Same rule for NFT reads: Reservoir publishes no Monad *mainnet* host, and falling
+    // back to the testnet one would list another chain's holdings under a mainnet banner
+    // — the wallet address is identical on both, so the answer looks plausible. Empty
+    // means get_nfts refuses until RESERVOIR_API_URL names an indexer (see fetchReservoir).
     reservoirUrl: "",
   },
 };
@@ -60,6 +75,11 @@ let gasMode;
 if (gasOverride === "dry-run" || !pimlicoKey) gasMode = "dry-run";
 else if (gasOverride === "native") gasMode = "native";
 else gasMode = "sponsored";
+
+// Slippage tolerance for swaps, in percent. Clamped to (0, 50]; a nonsense
+// value falls back to 1% (PuddleSwap's default). Override with SWAP_SLIPPAGE_PERCENT.
+const rawSlippage = Number(process.env.SWAP_SLIPPAGE_PERCENT || 1);
+const slippagePercent = rawSlippage > 0 && rawSlippage <= 50 ? rawSlippage : 1;
 
 const _home = homedir();
 if (!_home) throw new Error("Cannot determine home directory — set HOME env var");
@@ -128,6 +148,7 @@ export const config = {
   // Convenience flag for guardrails: mainnet moves real funds.
   isMainnet: network === "mainnet",
   gasMode,
+  slippagePercent,
   sponsorshipPolicyId,
   // ERC-4337 needs a bundler+paymaster. For a LOCAL CLI the Pimlico key stays on
   // this machine, so we can hit Pimlico directly — no server proxy needed (unlike
@@ -158,6 +179,9 @@ export function describeConfig() {
     `network:  ${config.chain.name} (chainId ${config.chain.chainId})`,
     `rpc:      ${config.chain.rpcUrl}`,
     `gas mode: ${config.gasMode}${config.gasMode === "dry-run" ? "  (sends are simulated — set PIMLICO_API_KEY to broadcast)" : ""}`,
+    ...(config.chain.dex
+      ? [`dex:      ${config.chain.dex.name}  (slippage ${config.slippagePercent}%)`]
+      : ["dex:      none (swaps disabled on this network)"]),
     ...(config.isMainnet ? ["warning:  MAINNET — sends move real MON"] : []),
     `account:  #${config.accountIndex}`,
     `model:    ${config.model.localPath || config.model.name}`,
