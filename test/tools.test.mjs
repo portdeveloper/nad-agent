@@ -224,7 +224,7 @@ describe("runAction — guards", () => {
 });
 
 // --- ERC-20 token balance reads (PR #25) ---
-import { resolveToken } from "../src/tokens.mjs";
+import { KNOWN_TOKENS, hasKnownTokenCatalog, listKnownTokenSymbols, resolveToken } from "../src/tokens.mjs";
 
 test("parseAction accepts token-balance JSON", () => {
   assert.deepEqual(parseAction('{"action":"get_token_balance","token":"USDC"}'), {
@@ -275,10 +275,44 @@ test("parseAction never guesses a send from free text", () => {
   });
 });
 
-test("resolveToken supports built-in testnet symbols and raw addresses", () => {
+test("resolveToken supports built-in network symbols and raw addresses", () => {
   assert.equal(resolveToken("usdc", "testnet").symbol, "USDC");
+  const mainnetTokens = {
+    USDC: ["0x754704Bc059F8C67012fEd69BC8A327a5aafb603", 6],
+    WETH: ["0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242", 18],
+    WMON: ["0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A", 18],
+  };
+  for (const [symbol, [address, decimals]] of Object.entries(mainnetTokens)) {
+    const token = resolveToken(symbol.toLowerCase(), "mainnet");
+    assert.equal(token.symbol, symbol);
+    assert.equal(token.address, address);
+    assert.equal(token.decimals, decimals);
+  }
   assert.equal(
     resolveToken("0x000000000000000000000000000000000000dEaD", "testnet").address,
     "0x000000000000000000000000000000000000dEaD",
   );
+});
+
+test("known token catalogs expose sorted symbols and distinguish an empty catalog", () => {
+  assert.deepEqual(listKnownTokenSymbols("mainnet"), ["USDC", "WETH", "WMON"]);
+  assert.equal(hasKnownTokenCatalog("mainnet"), true);
+  assert.equal(hasKnownTokenCatalog("missing"), false);
+});
+
+test("unknown token balance errors list the configured symbols", async () => {
+  const result = await runAction({ action: "get_token_balance", token: "NOT_A_TOKEN" });
+  assert.match(result, /Unknown token "NOT_A_TOKEN" on Monad Testnet/);
+  assert.match(result, /Known testnet symbols: USDC, WETH, WMON/);
+});
+
+test("unknown token balance errors explain when the catalog is empty", async () => {
+  const previousCatalog = KNOWN_TOKENS.testnet;
+  KNOWN_TOKENS.testnet = {};
+  try {
+    const result = await runAction({ action: "get_token_balance", token: "USDC" });
+    assert.equal(result, "No built-in token symbols are configured for Monad Testnet. Use a token contract address.");
+  } finally {
+    KNOWN_TOKENS.testnet = previousCatalog;
+  }
 });
