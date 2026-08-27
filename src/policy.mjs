@@ -171,10 +171,11 @@ export function describeSwapPolicy(policy, { nativeIn, value, sessionSpent = 0n 
 export function describePolicy(policy, { value, sessionSpent = 0n }) {
   if (!hasRules(policy)) return null;
   const parts = [];
-  if (policy.maxPerSession != null) {
+  // Token sends pass value=null because the MON amount limits do not apply to them.
+  if (policy.maxPerSession != null && value != null) {
     parts.push(`${formatMon(sessionSpent + value)} of ${formatMon(policy.maxPerSession)} MON session budget`);
   }
-  if (policy.maxPerSend != null) {
+  if (policy.maxPerSend != null && value != null) {
     parts.push(`per-send limit ${formatMon(policy.maxPerSend)} MON`);
   }
   if (policy.allowlist) {

@@ -7,10 +7,22 @@
  * Uses node:test + node:assert. Zero new dependencies.
  */
 
-import { describe, it } from "node:test";
+import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAction, describeAction, runAction, ACTIONS, isWrite } from "../src/tools.mjs";
+import {
+  parseAction,
+  describeAction,
+  prepareTokenSend,
+  previewTokenSend,
+  renderTokenSendPreview,
+  runAction,
+  ACTIONS,
+  isWrite,
+} from "../src/tools.mjs";
 import { config } from "../src/config.mjs";
+
+const DEAD = "0x000000000000000000000000000000000000dEaD";
+const BAD_TOKEN_CHECKSUM = "0x534b2F3A21130d7a60830c2Df862319e593943A3";
 
 // ---------------------------------------------------------------------------
 // ACTIONS shape
@@ -129,6 +141,275 @@ describe("runAction — send_token guard", () => {
   it("send_token with missing token returns error", async () => {
     const res = await runAction({ action: "send_token", to: "0x534b2f3A21130d7a60830c2Df862319e593943A3", amount: "1" });
     assert.match(String(res), /token/i);
+  });
+
+  it("does not execute a token send without prepared confirmation values", async () => {
+    const res = await runAction(
+      { action: "send_token", token: "USDC", to: DEAD, amount: "1" },
+      { ok: true, address: DEAD },
+    );
+    assert.match(String(res), /prepared token values from the confirmation flow/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prepareTokenSend — pre-prompt validation and single token resolution
+// ---------------------------------------------------------------------------
+
+describe("prepareTokenSend", () => {
+  it("prepares a catalog token with parsed amount and resolved recipient", async () => {
+    const result = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1.25" });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.recipient.address, DEAD);
+    assert.equal(result.token.symbol, "USDC");
+    assert.equal(result.token.decimals, 6);
+    assert.equal(result.amountWei, 1_250_000n);
+  });
+
+  it("loads metadata for a raw token address before parsing the amount", async () => {
+    let requestedAddress = null;
+    const result = await prepareTokenSend(
+      { action: "send_token", token: DEAD, to: DEAD, amount: "1.25" },
+      {
+        getMetadata: async (address) => {
+          requestedAddress = address;
+          return { address, symbol: "TEST", decimals: 2, name: "Test Token" };
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(requestedAddress, DEAD);
+    assert.equal(result.token.symbol, "TEST");
+    assert.equal(result.amountWei, 125n);
+  });
+
+  it("refuses a token that does not expose decimals", async () => {
+    const result = await prepareTokenSend(
+      { action: "send_token", token: DEAD, to: DEAD, amount: "1" },
+      { getMetadata: async () => ({ symbol: "NO_DECIMALS" }) },
+    );
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /does not expose decimals/);
+  });
+
+  it("falls back to the contract address when a token has no symbol", async () => {
+    const result = await prepareTokenSend(
+      { action: "send_token", token: DEAD, to: DEAD, amount: "1" },
+      { getMetadata: async () => ({ decimals: 6, name: "No Symbol Token" }) },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.token.symbol, DEAD);
+    assert.equal(result.amountWei, 1_000_000n);
+  });
+
+  it("refuses an unknown token before metadata lookup", async () => {
+    let lookedUp = false;
+    const result = await prepareTokenSend(
+      { action: "send_token", token: "NOT_A_TOKEN", to: DEAD, amount: "1" },
+      { getMetadata: async () => { lookedUp = true; return {}; } },
+    );
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /unknown token/i);
+    assert.equal(lookedUp, false);
+  });
+
+  it("refuses a token address with a bad checksum before metadata lookup", async () => {
+    let lookedUp = false;
+    const result = await prepareTokenSend(
+      { action: "send_token", token: BAD_TOKEN_CHECKSUM, to: DEAD, amount: "1" },
+      { getMetadata: async () => { lookedUp = true; return { decimals: 6 }; } },
+    );
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /checksum failed/);
+    assert.equal(lookedUp, false);
+  });
+
+  test("refuses an invalid token amount before confirmation", async () => {
+    const result = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "0" });
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /valid token amount/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// previewTokenSend — resolved token confirmation block
+// ---------------------------------------------------------------------------
+
+describe("previewTokenSend", () => {
+  it("shows token metadata, amount, recipient, gas mode, and token balance delta", async () => {
+    const previousGasMode = config.gasMode;
+    config.gasMode = "dry-run";
+    try {
+      const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1.25" });
+      const preview = await previewTokenSend(prepared, {
+        getBalance: async (address) => {
+          assert.equal(address, prepared.token.address);
+          return 10_000_000n;
+        },
+        quoteSend: async (to, tokenAddress, amountWei) => {
+          assert.equal(to, DEAD);
+          assert.equal(tokenAddress, prepared.token.address);
+          assert.equal(amountWei, 1_250_000n);
+          return { fee: 42_000_000_000_000n };
+        },
+        simulateSend: async (to, tokenAddress, amountWei) => {
+          assert.equal(to, DEAD);
+          assert.equal(tokenAddress, prepared.token.address);
+          assert.equal(amountWei, 1_250_000n);
+          return { simulated: true };
+        },
+      });
+
+      assert.equal(preview.ok, true);
+      assert.equal(preview.to, DEAD);
+      assert.equal(preview.tokenAddress, prepared.token.address);
+      assert.equal(preview.amount, "1.25");
+      assert.equal(preview.amountWei, 1_250_000n);
+      assert.equal(preview.before, 10_000_000n);
+      assert.equal(preview.after, 8_750_000n);
+      assert.equal(preview.fee, 42_000_000_000_000n);
+      assert.equal(preview.feeQuoted, true);
+      assert.equal(preview.simulated, true);
+      assert.equal(preview.insufficient, false);
+      assert.match(preview.gasLabel, /dry-run|gasless|you pay gas/);
+
+      const block = renderTokenSendPreview(preview);
+      assert.match(block, /Gas:.*~0\.000042 MON/);
+      assert.match(block, /Fee quote: available/);
+      assert.match(block, /Simulation: available/);
+    } finally {
+      config.gasMode = previousGasMode;
+    }
+  });
+
+  it("renders the gasless confirmation block", async () => {
+    const previousGasMode = config.gasMode;
+    config.gasMode = "sponsored";
+    try {
+      const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+      const preview = await previewTokenSend(prepared, {
+        getBalance: async () => 10_000_000n,
+        quoteSend: async () => ({ fee: 42_000_000_000_000n }),
+        simulateSend: async () => ({ simulated: true }),
+      });
+      const block = renderTokenSendPreview(preview);
+
+      assert.equal(preview.gasLabel, "gasless (paymaster covers fee)");
+      assert.match(block, /Gas:\s+gasless \(paymaster covers fee\)/);
+      assert.match(block, /Fee quote: available/);
+      assert.match(block, /Simulation: available/);
+    } finally {
+      config.gasMode = previousGasMode;
+    }
+  });
+
+  it("renders a warning when the token balance is insufficient", async () => {
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "2" });
+    const preview = await previewTokenSend(prepared, {
+      getBalance: async () => 1_000_000n,
+      simulateSend: async () => ({ simulated: true }),
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.equal(preview.insufficient, true);
+    assert.match(block, /Token:\s+USDC/);
+    assert.match(block, /Contract:/);
+    assert.match(block, /To:\s+.*dEaD/i);
+    assert.match(block, /Amount:\s+2\.0 USDC/);
+    assert.match(block, /Gas:/);
+    assert.match(block, /Fee quote: unavailable/);
+    assert.match(block, /Simulation: available/);
+    assert.match(block, /Balance:\s+1\.0 -> -1\.0 USDC/);
+    assert.match(block, /WARNING:.*token balance is below/);
+  });
+
+  it("surfaces an unavailable transfer quote without hiding the confirmation block", async () => {
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+    const preview = await previewTokenSend(prepared, {
+      getBalance: async () => 10_000_000n,
+      quoteSend: async () => { throw new Error("bundler unavailable"); },
+      simulateSend: async () => ({ simulated: true }),
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.equal(preview.feeQuoted, false);
+    assert.match(preview.quoteError, /bundler unavailable/);
+    assert.match(block, /Fee quote: unavailable/);
+    assert.match(block, /Simulation: available/);
+    assert.match(block, /WARNING:.*fee quote unavailable/);
+  });
+
+  it("explains why a dry-run fee estimate is unavailable", async () => {
+    const previousGasMode = config.gasMode;
+    config.gasMode = "dry-run";
+    try {
+      const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+      const preview = await previewTokenSend(prepared, {
+        getBalance: async () => 10_000_000n,
+        quoteSend: async () => { throw new Error("bundler unavailable"); },
+        simulateSend: async () => ({ simulated: true }),
+      });
+      const block = renderTokenSendPreview(preview);
+
+      assert.match(block, /Fee quote: unavailable \(dry-run has no bundler estimate\)/);
+      assert.match(block, /Simulation: available/);
+    } finally {
+      config.gasMode = previousGasMode;
+    }
+  });
+
+  it("renders a lowercase recipient in checksum form", async () => {
+    const raw = "0x1234567890abcdef1234567890abcdef12345678";
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: raw, amount: "1" });
+    const preview = await previewTokenSend(prepared, {
+      getBalance: async () => 10_000_000n,
+      quoteSend: async () => ({ fee: 0n }),
+      simulateSend: async () => ({ simulated: true }),
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.match(block, /To:\s+0x1234567890AbcdEF1234567890aBcdef12345678/);
+    assert.doesNotMatch(block, new RegExp(`To:\\s+${raw}`));
+  });
+
+  it("surfaces a transfer simulation warning before confirmation", async () => {
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+    const preview = await previewTokenSend(prepared, {
+      getBalance: async () => 10_000_000n,
+      quoteSend: async () => ({ fee: 0n }),
+      simulateSend: async () => { throw new Error("execution reverted: insufficient balance"); },
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.equal(preview.simulated, false);
+    assert.match(preview.simulationError, /insufficient balance/);
+    assert.match(block, /Simulation: unavailable/);
+    assert.match(block, /WARNING:.*simulation failed/);
+  });
+
+  it("shows the recipient policy that applies to a token send", async () => {
+    const prepared = await prepareTokenSend({ action: "send_token", token: "USDC", to: DEAD, amount: "1" });
+    const preview = await previewTokenSend(prepared, {
+      policy: {
+        maxPerSend: 500_000_000_000_000_000n,
+        maxPerSession: 1_000_000_000_000_000_000n,
+        allowlist: [DEAD],
+      },
+      sessionSpent: 100_000_000_000_000_000n,
+      getBalance: async () => 10_000_000n,
+      quoteSend: async () => ({ fee: 0n }),
+    });
+    const block = renderTokenSendPreview(preview);
+
+    assert.equal(preview.policyNote, "recipient allowlisted");
+    assert.match(block, /Policy:\s+recipient allowlisted/);
   });
 });
 

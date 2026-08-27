@@ -11,9 +11,28 @@ import { join } from "node:path";
 import { config, describeConfig } from "./config.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
-import { systemPrompt, parseAction, runAction, resolveSend, buildSwapPreview, lockBestSwap } from "./tools.mjs";
+import {
+  systemPrompt,
+  parseAction,
+  runAction,
+  resolveSend,
+  prepareTokenSend,
+  previewTokenSend,
+  renderTokenSendPreview,
+  buildSwapPreview,
+  lockBestSwap,
+} from "./tools.mjs";
+import { flushSmokeSuccess } from "./smoke-exit.mjs";
 
-const TEST_ADDR = "0x000000000000000000000000000000000000dEaD";
+// `npm run smoke` is a safety-critical dry-run check even when the operator's .env contains
+// a Pimlico key. Force the shared config before wallet/tool code can execute a write, so this
+// entrypoint can never turn its smoke sends into sponsored or native broadcasts.
+config.gasMode = "dry-run";
+
+// Avoid a highly repetitive address here: the bundled small model can occasionally
+// drop one zero while copying it, which makes the model-driven smoke step flaky.
+const TEST_ADDR = "0x1234567890abcdef1234567890abcdef12345678";
+const TEST_ADDR_CHECKSUM = "0x1234567890AbcdEF1234567890aBcdef12345678";
 const log = (s = "") => console.log(s);
 const indent = (s) => "  " + String(s).replace(/\n/g, "\n  ");
 
@@ -66,6 +85,26 @@ try {
   rmSync(bookDir, { recursive: true, force: true });
 }
 
+// 2c) Token send: prepare metadata and amount once, render the same confirmation data,
+// then execute the exact prepared values in dry-run mode.
+log("\nsend_token (dry-run):");
+const tokenSend = { action: "send_token", token: "USDC", to: TEST_ADDR, amount: "0.01" };
+const tokenPrep = await prepareTokenSend(tokenSend);
+if (!tokenPrep.ok) throw new Error("token send was refused before preview: " + tokenPrep.reason);
+const tokenPreview = await previewTokenSend(tokenPrep);
+if (!tokenPreview.ok) throw new Error("token preview failed: " + tokenPreview.reason);
+const tokenBlock = renderTokenSendPreview(tokenPreview);
+if (!tokenBlock.includes("USDC") || !tokenBlock.includes(TEST_ADDR_CHECKSUM)) {
+  throw new Error("token confirmation block is missing the token or resolved recipient");
+}
+log(indent(tokenBlock));
+const tokenSent = await runAction(tokenSend, tokenPrep.recipient, { preparedToken: tokenPrep });
+if (tokenSent.startsWith("Refused:")) throw new Error(tokenSent);
+if (!tokenSent.includes("0.01") || !tokenSent.includes(TEST_ADDR)) {
+  throw new Error("token dry-run receipt is missing the amount or resolved recipient");
+}
+log(indent(tokenSent));
+
 // 2c) Swap quote + dry-run against the live PuddleSwap router (no key, no funds).
 log("\nswap quote + dry-run (PuddleSwap):");
 {
@@ -116,4 +155,8 @@ for (const q of ["what is my MON balance?", `send 0.05 MON to ${TEST_ADDR}`]) {
 
 await brain.unloadBrain();
 wallet.dispose();
-log("\nSMOKE_OK");
+// QVAC's Bare worker can retain native child-process/socket handles after the SDK cleanup
+// round-trip. This is a one-shot smoke command, so terminate explicitly after the success
+// marker has been flushed instead of leaving CI or a terminal waiting on a worker that has
+// already completed.
+await flushSmokeSuccess();
