@@ -11,7 +11,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseAction, describeAction, runAction, isWrite, ACTIONS, systemPrompt } from "../src/tools.mjs";
-import { normalizeNftPage } from "../src/wallet.mjs";
+import { buildNftTransferCalldata, ERC721_ABI, normalizeNftPage } from "../src/wallet.mjs";
+import { Interface, getAddress } from "ethers";
 import { config } from "../src/config.mjs";
 
 // ---------------------------------------------------------------------------
@@ -362,5 +363,37 @@ describe("normalizeNftPage — truncation is reported, not silent", () => {
     for (const page of [undefined, null, {}, { tokens: null }, { tokens: "nope" }]) {
       assert.deepEqual(normalizeNftPage(page), { tokens: [], skipped: 0, truncated: false });
     }
+  });
+});
+
+describe("buildNftTransferCalldata — decoded calldata", () => {
+  const iface = new Interface(ERC721_ABI);
+  const from = "0x1234567890abcdef1234567890abcdef12345678";
+  const to = "0xabcdef1234567890abcdef1234567890abcdef12";
+
+  it("encodes safeTransferFrom with the three arguments", () => {
+    const data = buildNftTransferCalldata(from, to, "730");
+    const decoded = iface.decodeFunctionData("safeTransferFrom", data);
+    assert.equal(decoded[0], getAddress(from));
+    assert.equal(decoded[1], getAddress(to));
+    assert.equal(decoded[2], 730n);
+  });
+
+  it("uses the safeTransferFrom selector", () => {
+    const data = buildNftTransferCalldata(from, to, "1");
+    assert.equal(data.slice(0, 10), iface.getFunction("safeTransferFrom").selector);
+  });
+
+  it("takes a tokenId too large for a Number", () => {
+    const big = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    const decoded = iface.decodeFunctionData(
+      "safeTransferFrom",
+      buildNftTransferCalldata(from, to, big),
+    );
+    assert.equal(decoded[2], BigInt(big));
+  });
+
+  it("refuses an address that is not one", () => {
+    assert.throws(() => buildNftTransferCalldata("not-an-address", to, "1"));
   });
 });
