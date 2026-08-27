@@ -57,6 +57,20 @@ describe("parseAction — JSON path", () => {
     assert.deepEqual(parseAction('{"action":"send_mon","to":"0x123'), { action: "none" });
   });
 
+  it("rejects an earlier action when a later action object is truncated", () => {
+    assert.deepEqual(
+      parseAction('{"action":"send_mon","to":"0x000000000000000000000000000000000000dEaD","amountMon":"0.5"} then {"action":"send_mon","to":"0x123'),
+      { action: "none" },
+    );
+  });
+
+  it("rejects an earlier action when a later write is missing required arguments", () => {
+    assert.deepEqual(
+      parseAction('{"action":"send_mon","to":"0x000000000000000000000000000000000000dEaD","amountMon":"0.5"} then {"action":"send_mon","amountMon":"1"}'),
+      { action: "none" },
+    );
+  });
+
   it("rejects a write action missing required arguments", () => {
     assert.deepEqual(parseAction('{"action":"send_mon","amountMon":"0.5"}'), { action: "none" });
   });
@@ -85,6 +99,10 @@ describe("parseAction — JSON path", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseAction — lenient fallback (read-only actions only)", () => {
+  it("ignores lenient action names inside think blocks", () => {
+    assert.deepEqual(parseAction("<think>get_balance()</think> plain answer"), { action: "none" });
+  });
+
   it("plain-text get_balance()", () => {
     assert.deepEqual(parseAction("get_balance()"), { action: "get_balance" });
   });
