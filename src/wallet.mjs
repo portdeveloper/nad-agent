@@ -309,10 +309,14 @@ export function normalizeNftPage(data) {
       skipped += 1;
       continue;
     }
+    // Same shape of problem as the tokenId, one step quieter: String() on a non-string name
+    // renders "[object Object]" into the list. A name is decoration, so a malformed one is
+    // dropped and the token still shows under its id.
+    const name = typeof t.name === "string" && t.name ? t.name : undefined;
     tokens.push({
       contract,
       tokenId: String(t.tokenId),
-      ...(t.name ? { name: String(t.name) } : {}),
+      ...(name ? { name } : {}),
     });
   }
   return { tokens, skipped, truncated: Boolean(data?.continuation) };
