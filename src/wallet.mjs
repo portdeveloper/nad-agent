@@ -53,6 +53,18 @@ function getReadProvider() {
  * new network dependency; nothing else about the wallet changes.
  */
 async function fetchReservoir(path) {
+  // No indexer for this network → refuse. Checked before the key so a mainnet operator
+  // isn't sent to fetch a key for a host that doesn't exist. Reservoir has no Monad
+  // mainnet endpoint, and answering from the testnet one would report another chain's
+  // holdings as if they were mainnet — the address is the same on both, so nothing
+  // about the answer would look wrong. See NETWORKS in config.mjs.
+  if (!config.reservoirUrl) {
+    throw new Error(
+      `Refused: no NFT indexer is configured for ${config.chain.name}. ` +
+        `Reservoir does not index Monad mainnet, and reading testnet holdings here would be wrong. ` +
+        `Set RESERVOIR_API_URL in .env to an indexer for this network to enable NFT reads.`,
+    );
+  }
   if (!config.reservoirApiKey) {
     throw new Error("RESERVOIR_API_KEY is not set. Get a free key at https://reservoir.tools, then put it in .env");
   }
