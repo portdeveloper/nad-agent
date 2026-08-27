@@ -863,11 +863,23 @@ export async function runAction(a, resolved, opts = {}) {
       if (owner && !isAddress(owner)) {
         return `Refused: "${String(owner).trim()}" is not a valid address.`;
       }
-      const nfts = await wallet.getNfts(owner);
-      if (!nfts.length) return "No ERC-721 NFTs found.";
-      return nfts
-        .map((n) => `${n.name ?? `#${n.tokenId}`} (tokenId ${n.tokenId})\n  contract: ${n.contract}`)
-        .join("\n");
+      const { tokens, skipped, truncated } = await wallet.getNfts(owner);
+      // Notes, not silence: an empty list caused by unusable rows must not read as "you own
+      // nothing", and a capped list must not read as the whole wallet.
+      const notes = [];
+      if (skipped) {
+        notes.push(`(${skipped} entr${skipped === 1 ? "y" : "ies"} from the indexer could not be read and ${skipped === 1 ? "was" : "were"} skipped)`);
+      }
+      if (truncated) {
+        notes.push("(list is truncated: this wallet holds more than one page, only the first is shown)");
+      }
+      if (!tokens.length) {
+        return ["No ERC-721 NFTs found.", ...notes].join("\n");
+      }
+      return [
+        ...tokens.map((n) => `${n.name ?? `#${n.tokenId}`} (tokenId ${n.tokenId})\n  contract: ${n.contract}`),
+        ...notes,
+      ].join("\n");
     }
 
     case "transfer_nft": {
