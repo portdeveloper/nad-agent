@@ -59,6 +59,10 @@ npm start                   # interactive REPL
 - `scripts/` — doctor · gen-seed · fetch-model · build
 
 ## Scope & roadmap
-v0 actions: `get_address`, `get_balance`, `send` (native MON only). No tokens/swaps/bridges/NFTs
-yet; single account. **Upgrade path:** swap `src/tools.mjs` for QVAC native tool-calling
+Actions (`ACTIONS` in `src/tools.mjs`): `get_address`, `get_balance`, `get_token_balance`,
+`get_nfts`, `send_mon`, `send_token`, `transfer_nft`, `account`, `swap` — native MON and ERC-20
+sends, ERC-20 balance reads, ERC-721 reads and transfers, BIP-44 multi-account (list/switch),
+and testnet-only token swaps (swaps refuse on mainnet). No bridges or arbitrary contract calls.
+`send_token`, `get_nfts` and `transfer_nft` are natural-language only — there is no slash
+command for them. **Upgrade path:** swap `src/tools.mjs` for QVAC native tool-calling
 (`completion({ tools })`) or the `@tetherto/wdk-mcp-toolkit` MCP server (35 tools). See README.
