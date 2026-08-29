@@ -65,7 +65,7 @@ agent at startup instead of being ignored.
 
 ---
 
-**Scope (v0):** native MON + ERC-20 sends, read-only ERC-20 balance checks, ERC-721 NFT reads/transfers, and **testnet token swaps** via PuddleSwap — `get_address`, `get_balance`, `get_token_balance`, `get_nfts`, `send_mon`, `send_token`, `transfer_nft`, `swap`. Built-in ERC-20 symbols currently cover USDC, WETH, and WMON on both Monad networks; other tokens can be addressed by contract address. No bridges or arbitrary contract calls yet; testnet-first (swaps refuse on mainnet). It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
+**Scope (v0):** native MON + ERC-20 sends, read-only ERC-20 balance checks, ERC-721 NFT reads/transfers, BIP-44 multi-account (list/switch), and **testnet token swaps** via PuddleSwap — `get_address`, `get_balance`, `get_token_balance`, `get_nfts`, `send_mon`, `send_token`, `transfer_nft`, `account`, `swap`. Built-in ERC-20 symbols currently cover USDC, WETH, and WMON on both Monad networks; other tokens can be addressed by contract address. No bridges or arbitrary contract calls yet; testnet-first (swaps refuse on mainnet). It's a working proof-of-concept of a *local agentic wallet*, not a full DeFi suite — the [Upgrade path](#upgrade-path-bigger-agent) grows the toolset.
 
 ---
 
@@ -174,7 +174,7 @@ Then talk to it:
 › swap 0.1 MON for USDC              # quotes best PuddleSwap path, you confirm, then dry-run or swap
 ```
 
-Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/send <to> <mon>` `/account [index]` `/swap <amt> <in> <out>` `/config` `/help` `/exit`.
+Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/history` `/send <to> <mon>` `/account [index]` `/swap <amt> <in> <out>` `/config` `/help` `/exit`. Token sends and NFT actions (`send_token`, `get_nfts`, `transfer_nft`) have no slash command — those are natural-language requests and need the model.
 
 ---
 
