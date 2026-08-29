@@ -39,6 +39,42 @@ describe("parseAction — JSON path", () => {
     assert.deepEqual(parseAction(input), { action: "get_balance" });
   });
 
+  it("ignores JSON-looking fragments inside think blocks", () => {
+    assert.deepEqual(
+      parseAction('<think>{"action":"send_mon","to":"bad"}</think>{"action":"get_balance"}'),
+      { action: "get_balance" },
+    );
+  });
+
+  it("uses the last valid action JSON", () => {
+    assert.deepEqual(
+      parseAction('{"action":"get_address"} reasoning {"action":"get_balance"}'),
+      { action: "get_balance" },
+    );
+  });
+
+  it("rejects truncated action JSON", () => {
+    assert.deepEqual(parseAction('{"action":"send_mon","to":"0x123'), { action: "none" });
+  });
+
+  it("rejects an earlier action when a later action object is truncated", () => {
+    assert.deepEqual(
+      parseAction('{"action":"send_mon","to":"0x000000000000000000000000000000000000dEaD","amountMon":"0.5"} then {"action":"send_mon","to":"0x123'),
+      { action: "none" },
+    );
+  });
+
+  it("rejects an earlier action when a later write is missing required arguments", () => {
+    assert.deepEqual(
+      parseAction('{"action":"send_mon","to":"0x000000000000000000000000000000000000dEaD","amountMon":"0.5"} then {"action":"send_mon","amountMon":"1"}'),
+      { action: "none" },
+    );
+  });
+
+  it("rejects a write action missing required arguments", () => {
+    assert.deepEqual(parseAction('{"action":"send_mon","amountMon":"0.5"}'), { action: "none" });
+  });
+
   it("JSON inside prose", () => {
     const input = "Here you go: {\"action\":\"send_mon\",\"to\":\"0x000000000000000000000000000000000000dEaD\",\"amountMon\":\"1\"}";
     assert.deepEqual(parseAction(input), {
@@ -63,6 +99,10 @@ describe("parseAction — JSON path", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseAction — lenient fallback (read-only actions only)", () => {
+  it("ignores lenient action names inside think blocks", () => {
+    assert.deepEqual(parseAction("<think>get_balance()</think> plain answer"), { action: "none" });
+  });
+
   it("plain-text get_balance()", () => {
     assert.deepEqual(parseAction("get_balance()"), { action: "get_balance" });
   });
@@ -184,7 +224,7 @@ describe("runAction — guards", () => {
 });
 
 // --- ERC-20 token balance reads (PR #25) ---
-import { resolveToken } from "../src/tokens.mjs";
+import { KNOWN_TOKENS, hasKnownTokenCatalog, listKnownTokenSymbols, resolveToken } from "../src/tokens.mjs";
 
 test("parseAction accepts token-balance JSON", () => {
   assert.deepEqual(parseAction('{"action":"get_token_balance","token":"USDC"}'), {
@@ -235,10 +275,44 @@ test("parseAction never guesses a send from free text", () => {
   });
 });
 
-test("resolveToken supports built-in testnet symbols and raw addresses", () => {
+test("resolveToken supports built-in network symbols and raw addresses", () => {
   assert.equal(resolveToken("usdc", "testnet").symbol, "USDC");
+  const mainnetTokens = {
+    USDC: ["0x754704Bc059F8C67012fEd69BC8A327a5aafb603", 6],
+    WETH: ["0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242", 18],
+    WMON: ["0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A", 18],
+  };
+  for (const [symbol, [address, decimals]] of Object.entries(mainnetTokens)) {
+    const token = resolveToken(symbol.toLowerCase(), "mainnet");
+    assert.equal(token.symbol, symbol);
+    assert.equal(token.address, address);
+    assert.equal(token.decimals, decimals);
+  }
   assert.equal(
     resolveToken("0x000000000000000000000000000000000000dEaD", "testnet").address,
     "0x000000000000000000000000000000000000dEaD",
   );
+});
+
+test("known token catalogs expose sorted symbols and distinguish an empty catalog", () => {
+  assert.deepEqual(listKnownTokenSymbols("mainnet"), ["USDC", "WETH", "WMON"]);
+  assert.equal(hasKnownTokenCatalog("mainnet"), true);
+  assert.equal(hasKnownTokenCatalog("missing"), false);
+});
+
+test("unknown token balance errors list the configured symbols", async () => {
+  const result = await runAction({ action: "get_token_balance", token: "NOT_A_TOKEN" });
+  assert.match(result, /Unknown token "NOT_A_TOKEN" on Monad Testnet/);
+  assert.match(result, /Known testnet symbols: USDC, WETH, WMON/);
+});
+
+test("unknown token balance errors explain when the catalog is empty", async () => {
+  const previousCatalog = KNOWN_TOKENS.testnet;
+  KNOWN_TOKENS.testnet = {};
+  try {
+    const result = await runAction({ action: "get_token_balance", token: "USDC" });
+    assert.equal(result, "No built-in token symbols are configured for Monad Testnet. Use a token contract address.");
+  } finally {
+    KNOWN_TOKENS.testnet = previousCatalog;
+  }
 });

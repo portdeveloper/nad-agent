@@ -11,9 +11,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseAction, describeAction, runAction, isWrite, ACTIONS } from "../src/tools.mjs";
-import { config } from "../src/config.mjs";
-import { buildNftTransferCalldata, ERC721_ABI } from "../src/wallet.mjs";
+import { buildNftTransferCalldata, ERC721_ABI, normalizeNftPage } from "../src/wallet.mjs";
 import { Interface, getAddress } from "ethers";
+import { config } from "../src/config.mjs";
 
 // ---------------------------------------------------------------------------
 // ACTIONS shape
@@ -182,6 +182,92 @@ describe("runAction — get_nfts / transfer_nft guards", () => {
       resolved,
     );
     assert.match(String(res), /tokenId/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeNftPage — the Reservoir page mapping (issue #68)
+// ---------------------------------------------------------------------------
+
+const CONTRACT_A = "0x1111111111111111111111111111111111111111";
+const CONTRACT_B = "0x2222222222222222222222222222222222222222";
+const good = (tokenId, name) => ({ token: { contract: CONTRACT_A, tokenId, ...(name ? { name } : {}) } });
+
+describe("normalizeNftPage — one bad row must not discard the response", () => {
+  it("keeps the usable tokens and counts the ones it dropped", () => {
+    // Before this, checksumAddress(undefined) threw out of the .map() and the caller got an
+    // error line instead of the tokens it did own.
+    const page = {
+      tokens: [
+        good("7", "First"),
+        { token: { tokenId: "9" } },                 // no contract at all
+        { token: { contract: "not-an-address", tokenId: "11" } },
+        good("13"),
+        { token: null },                             // container present, nothing in it
+        null,                                        // row itself missing
+      ],
+    };
+    const { tokens, skipped } = normalizeNftPage(page);
+    assert.deepEqual(tokens.map((t) => t.tokenId), ["7", "13"]);
+    assert.equal(skipped, 4);
+    assert.equal(tokens[0].name, "First");
+    assert.equal(tokens[1].name, undefined);
+  });
+
+  it("never emits the string \"undefined\" as a tokenId", () => {
+    // String(t.tokenId) used to render "undefined" in the list and could be handed straight
+    // to transfer_nft as a tokenId.
+    const { tokens, skipped } = normalizeNftPage({
+      tokens: [{ token: { contract: CONTRACT_B } }, { token: { contract: CONTRACT_B, tokenId: "" } }],
+    });
+    assert.deepEqual(tokens, []);
+    assert.equal(skipped, 2);
+  });
+
+  it("accepts a numeric tokenId and returns it as a string", () => {
+    const { tokens } = normalizeNftPage({ tokens: [{ token: { contract: CONTRACT_A, tokenId: 42 } }] });
+    assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "42" }]);
+  });
+
+  it("keeps tokenId 0, which is valid and falsy", () => {
+    // The reason the guard tests for undefined/null/empty rather than falsiness: token id 0
+    // is a real id, and a truthiness check would silently drop it.
+    const { tokens, skipped } = normalizeNftPage({ tokens: [{ token: { contract: CONTRACT_A, tokenId: 0 } }] });
+    assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "0" }]);
+    assert.equal(skipped, 0);
+  });
+
+  it("drops a malformed name instead of rendering [object Object]", () => {
+    // Same shape as the tokenId problem, one step quieter: String({}) reaches the operator's
+    // list as "[object Object]". The name is decoration, so the token survives without it.
+    const { tokens } = normalizeNftPage({
+      tokens: [{ token: { contract: CONTRACT_A, tokenId: "1", name: { evil: true } } }],
+    });
+    assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "1" }]);
+  });
+
+  it("checksums the contract rather than passing the indexer's casing through", () => {
+    const { tokens } = normalizeNftPage({ tokens: [{ token: { contract: CONTRACT_A.toLowerCase(), tokenId: "1" } }] });
+    assert.equal(tokens[0].contract, CONTRACT_A);
+  });
+});
+
+describe("normalizeNftPage — truncation is reported, not silent", () => {
+  it("flags a page that has a continuation cursor", () => {
+    const { tokens, truncated } = normalizeNftPage({ tokens: [good("1")], continuation: "cursor-abc" });
+    assert.equal(tokens.length, 1);
+    assert.equal(truncated, true);
+  });
+
+  it("does not flag a complete page", () => {
+    assert.equal(normalizeNftPage({ tokens: [good("1")] }).truncated, false);
+    assert.equal(normalizeNftPage({ tokens: [good("1")], continuation: null }).truncated, false);
+  });
+
+  it("survives a response that is missing or malformed entirely", () => {
+    for (const page of [undefined, null, {}, { tokens: null }, { tokens: "nope" }]) {
+      assert.deepEqual(normalizeNftPage(page), { tokens: [], skipped: 0, truncated: false });
+    }
   });
 });
 

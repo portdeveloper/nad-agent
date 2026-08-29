@@ -103,29 +103,90 @@ export function systemPrompt() {
   );
 }
 
-/** Extract an action from a model response: JSON first, then a lenient fallback. */
-export function parseAction(text) {
-  const m = text.match(/\{[\s\S]*?\}/);
-  if (m) {
-    try {
-      const obj = JSON.parse(m[0]);
-      const token = obj.token ?? obj.symbol ?? obj.tokenAddress;
-      if (obj.action === "get_balance" && token && !isNativeToken(token)) {
-        return { action: "get_token_balance", token };
+function normalizeParsedAction(obj) {
+  if (!obj?.action || !ACTIONS[obj.action]) return null;
+  const token = obj.token ?? obj.symbol ?? obj.tokenAddress;
+  if (obj.action === "get_balance" && token && !isNativeToken(token)) {
+    return { action: "get_token_balance", token };
+  }
+  if (obj.action === "swap") {
+    return {
+      action: "swap",
+      amountIn: String(obj.amountIn ?? obj.amount ?? ""),
+      tokenIn: obj.tokenIn ?? obj.from,
+      tokenOut: obj.tokenOut ?? obj.to,
+    };
+  }
+  if (obj.action === "transfer_nft" && !obj.to && obj.toAddress) obj = { ...obj, to: obj.toAddress };
+  return obj;
+}
+
+function hasRequiredArgs(action) {
+  if (action.action === "account" || action.action === "get_nfts") return true;
+  const aliases = { token: ["token", "symbol", "tokenAddress"], to: ["to", "toAddress"] };
+  return (ACTIONS[action.action]?.args ?? []).every((key) => {
+    const keys = aliases[key] ?? [key];
+    return keys.some((candidate) =>
+      action[candidate] !== undefined && action[candidate] !== null && String(action[candidate]).trim() !== ""
+    );
+  });
+}
+
+function extractJsonCandidates(text) {
+  const source = String(text ?? "").replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
+  const candidates = [];
+  let unterminated = "";
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== "{") continue;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let j = i; j < source.length; j++) {
+      const ch = source[j];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') quoted = false;
+        continue;
       }
-      if (obj.action === "swap") {
-        return {
-          action: "swap",
-          amountIn: String(obj.amountIn ?? obj.amount ?? ""),
-          tokenIn: obj.tokenIn ?? obj.from,
-          tokenOut: obj.tokenOut ?? obj.to,
-        };
+      if (ch === '"') { quoted = true; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) {
+        candidates.push(source.slice(i, j + 1));
+        i = j;
+        break;
       }
-      if (obj.action && ACTIONS[obj.action]) return obj;
-    } catch {
-      /* fall through to the lenient path */
+    }
+    if (depth > 0) {
+      unterminated = source.slice(i);
+      break;
     }
   }
+  return { source, candidates, unterminated };
+}
+
+/** Extract an action from a model response: JSON first, then a lenient fallback. */
+export function parseAction(text) {
+  const extracted = extractJsonCandidates(text);
+  if (extracted.unterminated && /\"action\"\s*:/i.test(extracted.unterminated)) {
+    return { action: "none" };
+  }
+  let sawAction = false;
+  for (const candidate of extracted.candidates.reverse()) {
+    try {
+      const action = normalizeParsedAction(JSON.parse(candidate));
+      if (!action) continue;
+      sawAction = true;
+      if (!hasRequiredArgs(action)) return { action: "none" };
+      return action;
+    } catch {
+      /* try the next JSON object */
+    }
+  }
+  if (sawAction || (extracted.source.includes("{") && /\"action\"\s*:/i.test(extracted.source))) {
+    return { action: "none" };
+  }
+  const fallbackText = extracted.source;
   // Small models often emit `get_balance()` instead of JSON. Recognize READ-ONLY
   // action names in the text — but never auto-trigger a write (send needs real args).
   // Only accept the extracted token if it looks like a real identifier: a 0x address,
@@ -137,27 +198,27 @@ export function parseAction(text) {
     if (/^[a-zA-Z]{1,20}$/.test(t)) return t;              // short symbol
     return null;                                             // garbage — ignore
   };
-  const tokenBalanceCall = text.match(/\bget_token_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
+  const tokenBalanceCall = fallbackText.match(/\bget_token_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
   if (tokenBalanceCall) {
     const t = sanitizeLenientToken(tokenBalanceCall[1]);
     if (t) return { action: "get_token_balance", token: t };
   }
-  const balanceWithTokenCall = text.match(/\bget_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
+  const balanceWithTokenCall = fallbackText.match(/\bget_balance\s*\(\s*["']?([^"')\s,]+)["']?\s*\)/i);
   if (balanceWithTokenCall) {
     const t = sanitizeLenientToken(balanceWithTokenCall[1]);
     if (t) return isNativeToken(t) ? { action: "get_balance" } : { action: "get_token_balance", token: t };
   }
 
-  const tokenBalancePhrase = parseTokenBalancePhrase(text);
+  const tokenBalancePhrase = parseTokenBalancePhrase(fallbackText);
   if (tokenBalancePhrase) return tokenBalancePhrase;
 
-  if (looksLikeNftQuestion(text)) return { action: "get_nfts" };
+  if (looksLikeNftQuestion(fallbackText)) return { action: "get_nfts" };
 
-  const swap = parseSwapPhrase(text);
+  const swap = parseSwapPhrase(fallbackText);
   if (swap) return swap;
 
   for (const name of ["get_balance", "get_address", "get_nfts"]) {
-    if (new RegExp(`\\b${name}\\b`).test(text)) return { action: name };
+    if (new RegExp(`\\b${name}\\b`).test(fallbackText)) return { action: name };
   }
   return { action: "none" };
 }
@@ -219,9 +280,26 @@ function tokenInput(a) {
   return a.token ?? a.tokenSymbol ?? a.tokenAddress ?? a.symbol ?? "";
 }
 
-function knownTokenHint() {
+function tokenCatalogStatus() {
   const known = listKnownTokenSymbols();
-  return known.length ? ` Known ${config.chain.network} symbols: ${known.join(", ")}.` : "";
+  if (!known.length) {
+    return {
+      hasEntries: false,
+      hint: `No built-in token symbols are configured for ${config.chain.name}.`,
+    };
+  }
+  return {
+    hasEntries: true,
+    hint: `Known ${config.chain.network} symbols: ${known.join(", ")}.`,
+  };
+}
+
+function unknownTokenMessage(input) {
+  const catalog = tokenCatalogStatus();
+  if (!catalog.hasEntries) {
+    return `${catalog.hint} Use a token contract address.`;
+  }
+  return `Unknown token "${safeEcho(input)}" on ${config.chain.name}. Use a token contract address. ${catalog.hint}`;
 }
 
 /**
@@ -259,10 +337,7 @@ export async function prepareTokenSend(
     return { ok: false, reason: `invalid token "${safeEcho(input)}": ${safeEcho(detail)}` };
   }
   if (!token) {
-    return {
-      ok: false,
-      reason: `unknown token "${safeEcho(input)}" on ${config.chain.name}. Use a token contract address.${knownTokenHint()}`,
-    };
+    return { ok: false, reason: unknownTokenMessage(input) };
   }
 
   let prepared = token;
@@ -795,9 +870,7 @@ export async function runAction(a, resolved, opts = {}) {
       }
       const token = resolveToken(input);
       if (!token) {
-        const known = listKnownTokenSymbols();
-        const hint = known.length ? ` Known ${config.chain.network} symbols: ${known.join(", ")}.` : "";
-        return `Unknown token "${String(input).trim()}" on ${config.chain.name}. Use a token contract address.${hint}`;
+        return unknownTokenMessage(input);
       }
 
       let { symbol, decimals, name } = token;
@@ -863,11 +936,23 @@ export async function runAction(a, resolved, opts = {}) {
       if (owner && !isAddress(owner)) {
         return `Refused: "${String(owner).trim()}" is not a valid address.`;
       }
-      const nfts = await wallet.getNfts(owner);
-      if (!nfts.length) return "No ERC-721 NFTs found.";
-      return nfts
-        .map((n) => `${n.name ?? `#${n.tokenId}`} (tokenId ${n.tokenId})\n  contract: ${n.contract}`)
-        .join("\n");
+      const { tokens, skipped, truncated } = await wallet.getNfts(owner);
+      // Notes, not silence: an empty list caused by unusable rows must not read as "you own
+      // nothing", and a capped list must not read as the whole wallet.
+      const notes = [];
+      if (skipped) {
+        notes.push(`(${skipped} entr${skipped === 1 ? "y" : "ies"} from the indexer could not be read and ${skipped === 1 ? "was" : "were"} skipped)`);
+      }
+      if (truncated) {
+        notes.push("(list is truncated: this wallet holds more than one page, only the first is shown)");
+      }
+      if (!tokens.length) {
+        return ["No ERC-721 NFTs found.", ...notes].join("\n");
+      }
+      return [
+        ...tokens.map((n) => `${n.name ?? `#${n.tokenId}`} (tokenId ${n.tokenId})\n  contract: ${n.contract}`),
+        ...notes,
+      ].join("\n");
     }
 
     case "transfer_nft": {

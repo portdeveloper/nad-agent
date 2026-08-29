@@ -17,8 +17,10 @@ import {
   renderTokenSendPreview,
   runAction,
   ACTIONS,
+  isWrite,
 } from "../src/tools.mjs";
 import { config } from "../src/config.mjs";
+import { KNOWN_TOKENS } from "../src/tokens.mjs";
 
 const DEAD = "0x000000000000000000000000000000000000dEaD";
 const BAD_TOKEN_CHECKSUM = "0x534b2F3A21130d7a60830c2Df862319e593943A3";
@@ -123,7 +125,7 @@ describe("describeAction — send_token", () => {
 
 describe("isWrite — send_token", () => {
   it("send_token is a write", () => {
-    assert.equal(parseAction('{"action":"send_token"}').action === "send_token" && ACTIONS.send_token !== undefined, true);
+    assert.equal(isWrite("send_token"), true);
   });
 });
 
@@ -215,6 +217,22 @@ describe("prepareTokenSend", () => {
     assert.equal(result.ok, false);
     assert.match(result.reason, /unknown token/i);
     assert.equal(lookedUp, false);
+  });
+
+  it("explains when the active network has no built-in token catalog", async () => {
+    const previousCatalog = KNOWN_TOKENS.testnet;
+    KNOWN_TOKENS.testnet = {};
+    try {
+      const result = await prepareTokenSend(
+        { action: "send_token", token: "USDC", to: DEAD, amount: "1" },
+        { getMetadata: async () => ({}) },
+      );
+
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, "No built-in token symbols are configured for Monad Testnet. Use a token contract address.");
+    } finally {
+      KNOWN_TOKENS.testnet = previousCatalog;
+    }
   });
 
   it("refuses a token address with a bad checksum before metadata lookup", async () => {

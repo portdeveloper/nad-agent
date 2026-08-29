@@ -270,25 +270,72 @@ export async function simulateTokenSend(to, tokenAddress, amountWei) {
   return { simulated: true };
 }
 
+/** How many tokens one Reservoir page returns; the cap the caller is told about. */
+const NFT_PAGE_LIMIT = 100;
+
+/**
+ * Shape one Reservoir `/users/{owner}/tokens/v7` page into { tokens, skipped, truncated }.
+ *
+ * Pure, so the mapping is testable without the indexer (same split as
+ * normalizeHistoryTransaction).
+ *
+ * Rows are taken one at a time and a broken one is dropped rather than allowed to escape:
+ * the previous `.map()` guarded the container with `entry?.token ?? {}` but not the fields, so
+ * `checksumAddress(undefined)` threw out of the map and took the whole response with it. One
+ * bad row from the indexer turned "you own 40 NFTs" into an error with none of them.
+ *
+ * Dropping silently would only move the lie, so what went is counted. `skipped` is that count,
+ * and `truncated` says the wallet holds more than this page. Rejecting the one and keeping the
+ * rest, with the rejection visible, is how loadAddressBook already handles a bad entry.
+ */
+export function normalizeNftPage(data) {
+  const rows = Array.isArray(data?.tokens) ? data.tokens : [];
+  const tokens = [];
+  let skipped = 0;
+  for (const entry of rows) {
+    const t = entry?.token ?? {};
+    // A token with no id is not addressable: String(undefined) would put the literal
+    // "undefined" in the rendered list and hand it to transfer_nft as a tokenId.
+    if (t.tokenId === undefined || t.tokenId === null || String(t.tokenId).trim() === "") {
+      skipped += 1;
+      continue;
+    }
+    // checksumAddress throws on anything that is not an address, which is exactly the row to
+    // drop rather than let it discard a good response.
+    let contract;
+    try {
+      contract = checksumAddress(t.contract);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    // Same shape of problem as the tokenId, one step quieter: String() on a non-string name
+    // renders "[object Object]" into the list. A name is decoration, so a malformed one is
+    // dropped and the token still shows under its id.
+    const name = typeof t.name === "string" && t.name ? t.name : undefined;
+    tokens.push({
+      contract,
+      tokenId: String(t.tokenId),
+      ...(name ? { name } : {}),
+    });
+  }
+  return { tokens, skipped, truncated: Boolean(data?.continuation) };
+}
+
 /**
  * Owned ERC-721 tokens for an address (defaults to the agent's wallet).
  *
  * Reads come from the Reservoir indexer, not eth_getLogs — see fetchReservoir.
- * Returns [{ contract, tokenId, name? }], one entry per token, tokenId as a string.
+ * Returns { tokens, skipped, truncated }; see normalizeNftPage for the shape and why the two
+ * counters are part of it.
  */
 export async function getNfts(ownerAddress = address) {
   if (!ownerAddress) throw new Error("Wallet not initialized");
   const owner = checksumAddress(ownerAddress);
-  const data = await fetchReservoir(`/users/${owner}/tokens/v7?limit=100`);
-  // Known follow-up: page past 100 via the `continuation` field for wallets with more.
-  return (data?.tokens ?? []).map((entry) => {
-    const t = entry?.token ?? {};
-    return {
-      contract: checksumAddress(t.contract),
-      tokenId: String(t.tokenId),
-      ...(t.name ? { name: String(t.name) } : {}),
-    };
-  });
+  const data = await fetchReservoir(`/users/${owner}/tokens/v7?limit=${NFT_PAGE_LIMIT}`);
+  // Known follow-up: page past the limit via `continuation` for wallets with more. Until then
+  // the caller is at least told the list is partial.
+  return normalizeNftPage(data);
 }
 
 /**

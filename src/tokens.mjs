@@ -2,8 +2,9 @@ import { getAddress } from "ethers";
 import { config } from "./config.mjs";
 import { isAddress } from "./format.mjs";
 
-// Built-in testnet token entries are from the Monad token-list testnet JSON:
+// Built-in token entries are from the Monad token-list JSON files:
 // https://github.com/monad-crypto/token-list/blob/main/tokenlist-testnet.json
+// https://github.com/monad-crypto/token-list/blob/main/tokenlist-mainnet.json
 // Raw token addresses still work for anything not listed here.
 export const KNOWN_TOKENS = {
   testnet: {
@@ -23,10 +24,31 @@ export const KNOWN_TOKENS = {
       decimals: 18,
     },
   },
+  mainnet: {
+    USDC: {
+      address: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+      name: "USD Coin",
+      decimals: 6,
+    },
+    WETH: {
+      address: "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+      name: "Wrapped Ether",
+      decimals: 18,
+    },
+    WMON: {
+      address: "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+      name: "Wrapped MON",
+      decimals: 18,
+    },
+  },
 };
 
 export function listKnownTokenSymbols(network = config.chain.network) {
   return Object.keys(KNOWN_TOKENS[network] ?? {}).sort();
+}
+
+export function hasKnownTokenCatalog(network = config.chain.network) {
+  return listKnownTokenSymbols(network).length > 0;
 }
 
 export function resolveToken(input, network = config.chain.network) {
