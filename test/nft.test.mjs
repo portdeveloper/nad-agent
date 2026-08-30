@@ -10,7 +10,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseAction, describeAction, runAction, isWrite, ACTIONS } from "../src/tools.mjs";
+import { parseAction, describeAction, runAction, isWrite, ACTIONS, systemPrompt } from "../src/tools.mjs";
 import { normalizeNftPage } from "../src/wallet.mjs";
 import { config } from "../src/config.mjs";
 
@@ -157,6 +157,26 @@ describe("describeAction — get_nfts / transfer_nft", () => {
 // runAction — guards
 // ---------------------------------------------------------------------------
 
+describe("transfer_nft — model-facing signature", () => {
+  it("systemPrompt offers fromAddress, marked optional", () => {
+    // desc has always told the model it may pass fromAddress, but systemPrompt() builds the
+    // signature from args, so the parameter never appeared in the list the model reads.
+    // It cannot go in args itself: hasRequiredArgs() treats every entry there as mandatory,
+    // which would break every transfer that legitimately omits it.
+    const line = systemPrompt().split("\n").find((l) => l.includes("transfer_nft("));
+    assert.ok(line, "systemPrompt should list transfer_nft");
+    assert.ok(line.includes("fromAddress?"), `fromAddress missing or unmarked in: ${line}`);
+  });
+
+  it("omitting fromAddress still parses as a complete action", () => {
+    const parsed = parseAction(
+      '{"action":"transfer_nft","to":"0x1234567890abcdef1234567890abcdef12345678",' +
+      '"contractAddress":"0x1234567890abcdef1234567890abcdef12345678","tokenId":"7"}',
+    );
+    assert.equal(parsed.action, "transfer_nft");
+  });
+});
+
 describe("runAction — get_nfts / transfer_nft guards", () => {
   it("get_nfts with invalid address returns refusal", async () => {
     const res = await runAction({ action: "get_nfts", address: "not-an-address" });
@@ -166,6 +186,39 @@ describe("runAction — get_nfts / transfer_nft guards", () => {
   it("transfer_nft with invalid to returns refusal", async () => {
     const res = await runAction({ action: "transfer_nft", contractAddress: "0xabc", tokenId: "1", to: "not-an-address" });
     assert.match(String(res), /refused/i);
+  });
+
+  it("transfer_nft refuses a malformed fromAddress instead of throwing", async () => {
+    // fromAddress was the one field on this path that reached ethers unchecked: a garbage
+    // value came back as a raw `invalid address (argument="address"…)` throw from inside the
+    // wallet rather than the Refused: line every other rejection here produces. The refusal
+    // has to happen before the wallet is touched, which is also why this needs no wallet.
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const res = await runAction(
+      { action: "transfer_nft", contractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+        tokenId: "1", to: resolved.address, fromAddress: "not-an-address" },
+      resolved,
+    );
+    assert.match(String(res), /refused/i);
+    assert.match(String(res), /fromAddress/i);
+  });
+
+  it("transfer_nft refuses an empty fromAddress rather than silently sending from self", async () => {
+    // "" is falsy only at the call site — the default parameter never kicks in, so it still
+    // reaches checksumAddress. Refusing beats quietly transferring from the agent's own
+    // wallet when the caller clearly meant to name a different owner.
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const res = await runAction(
+      { action: "transfer_nft", contractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+        tokenId: "1", to: resolved.address, fromAddress: "" },
+      resolved,
+    );
+    assert.match(String(res), /refused/i);
+    // isAddress() alone would already refuse this, but as `Refused: "" is not a valid
+    // fromAddress` — a pair of quotes and no explanation. The separate branch exists for the
+    // message, so assert the message, not just that something was refused.
+    assert.match(String(res), /empty/i);
+    assert.match(String(res), /omit it/i);
   });
 
   it("transfer_nft with missing contract returns refusal", async () => {
