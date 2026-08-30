@@ -45,6 +45,7 @@ export const ACTIONS = {
   },
   transfer_nft: {
     args: ["to", "contractAddress", "tokenId"],
+    optionalArgs: ["fromAddress"],
     desc: "Send an ERC-721 NFT to `to` — a 0x address or an address-book name. `contractAddress` is the NFT contract address, `tokenId` the token id as a string. Sends from the agent's own wallet unless `fromAddress` is given.",
   },
   swap: {
@@ -86,7 +87,13 @@ function parseTokenBalancePhrase(text) {
 /** Build the system prompt describing the tool protocol. */
 export function systemPrompt() {
   const list = Object.entries(ACTIONS)
-    .map(([name, { args, desc }]) => `- ${name}(${args.join(", ")}): ${desc}`)
+    .map(([name, { args, optionalArgs = [], desc }]) => {
+      // Optional arguments belong in the signature the model reads — `desc` already tells it
+      // to use them — but not in `args`, which hasRequiredArgs() treats as mandatory. Marking
+      // them keeps the model from filling one in merely because it appears in the list.
+      const shown = [...args, ...optionalArgs.map((x) => `${x}?`)];
+      return `- ${name}(${shown.join(", ")}): ${desc}`;
+    })
     .join("\n");
   const dex = config.chain.dex;
   const swapLine = dex
@@ -436,7 +443,11 @@ export function describeAction(a, resolved) {
       // output. isWrite() covers transfer_nft, so resolveSend() has already run.
       const contract = a.contractAddress ?? a.contract ?? "unknown contract";
       const dest = resolved?.ok ? formatRecipient(resolved) : "[recipient not resolved]";
-      const from = a.fromAddress ? ` (from ${a.fromAddress})` : "";
+      // safeEcho for the same reason the label and recipient get it: this line is what the
+      // operator reads before approving, and an unsanitized value can reflow or overwrite
+      // what follows. runAction refuses a malformed fromAddress outright, but describeAction
+      // renders before that runs.
+      const from = a.fromAddress ? ` (from ${safeEcho(String(a.fromAddress), 42)})` : "";
       return `Send NFT #${a.tokenId} (${contract}) -> ${dest}${from}` +
         (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
     }
@@ -962,6 +973,22 @@ export async function runAction(a, resolved, opts = {}) {
       if (!contract) return "Refused: no NFT contract address given.";
       if (a.tokenId === undefined || a.tokenId === null || String(a.tokenId).trim() === "") {
         return "Refused: no tokenId given.";
+      }
+      // `fromAddress` is optional — it only matters when the agent transfers an NFT it holds
+      // an approval on rather than one it owns. But it is model output like `contract` and
+      // `tokenId` above, and it was the one field on this path reaching ethers unchecked: a
+      // garbage value came back as a raw `invalid address (argument="address"…)` throw from
+      // inside the wallet instead of the `Refused:` line every other rejection here produces.
+      // An empty string did the same, because "" is only falsy at the call site — it still
+      // reaches checksumAddress. Refuse before the wallet is touched, like the two above.
+      if (a.fromAddress !== undefined && a.fromAddress !== null) {
+        const fromAddress = String(a.fromAddress);
+        if (fromAddress.trim() === "") {
+          return "Refused: fromAddress was given but empty — omit it to send from your own wallet.";
+        }
+        if (!isAddress(fromAddress)) {
+          return `Refused: "${safeEcho(fromAddress)}" is not a valid fromAddress.`;
+        }
       }
       const res = await wallet.transferNft(to, contract, String(a.tokenId), a.fromAddress);
       const label = `#${a.tokenId} (${contract})`;
