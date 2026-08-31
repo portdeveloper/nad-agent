@@ -444,10 +444,13 @@ export function describeAction(a, resolved) {
       const contract = a.contractAddress ?? a.contract ?? "unknown contract";
       const dest = resolved?.ok ? formatRecipient(resolved) : "[recipient not resolved]";
       // safeEcho for the same reason the label and recipient get it: this line is what the
-      // operator reads before approving, and an unsanitized value can reflow or overwrite
-      // what follows. runAction refuses a malformed fromAddress outright, but describeAction
-      // renders before that runs.
-      const from = a.fromAddress ? ` (from ${safeEcho(String(a.fromAddress), 42)})` : "";
+      // operator reads before approving, and an unsanitised value can reflow or overwrite
+      // what follows. Trimmed as well, because runAction refuses padding but only after this
+      // line has been shown and approved — the guard protects the wallet, not the reader, so
+      // the reader is served a clean line here rather than a ragged one plus a late refusal.
+      const from = a.fromAddress
+        ? ` (from ${safeEcho(String(a.fromAddress).trim(), 42)})`
+        : "";
       return `Send NFT #${a.tokenId} (${contract}) -> ${dest}${from}` +
         (config.gasMode === "dry-run" ? "  (DRY RUN — will be simulated)" : config.gasMode === "sponsored" ? "  (gasless)" : "  (you pay gas)");
     }
