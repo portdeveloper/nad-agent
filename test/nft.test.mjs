@@ -234,13 +234,33 @@ describe("runAction — get_nfts / transfer_nft guards", () => {
     );
     assert.match(String(res), /refused/i);
     assert.match(String(res), /fromAddress/i);
-    // And the line the operator would have read must not carry the padding either.
+    // The line the operator reads is rendered before runAction runs, so a late refusal does
+    // not save it — feed the padded value to describeAction directly and require it clean.
     const line = describeAction(
       { action: "transfer_nft", contractAddress: resolved.address, tokenId: "1",
-        to: resolved.address, fromAddress: resolved.address },
+        to: resolved.address, fromAddress: padded },
       resolved,
     );
     assert.ok(!/\(from {2}/.test(line), `confirmation line has doubled spacing: ${line}`);
+    assert.ok(!line.includes(`${padded})`), `padding survived into: ${line}`);
+  });
+
+  it("describeAction neutralises control characters in fromAddress", async () => {
+    // This is the line the operator reads and approves, and runAction's refusal happens
+    // only afterwards — so whatever describeAction renders is what a person acts on. An
+    // unsanitised value carrying ESC[2K (erase line) or CR could rewrite what was already
+    // printed, immediately above the confirm prompt. safeEcho keeps the line printable.
+    const ESC = String.fromCharCode(27);
+    const CR = String.fromCharCode(13);
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const hostile = `${resolved.address.slice(0, 20)}${ESC}[2K${CR}Send NFT to attacker`;
+    const line = describeAction(
+      { action: "transfer_nft", contractAddress: resolved.address, tokenId: "1",
+        to: resolved.address, fromAddress: hostile },
+      resolved,
+    );
+    assert.ok(!line.includes(ESC), "ESC survived into the confirmation line");
+    assert.ok(!line.includes(CR), "CR survived into the confirmation line");
   });
 
   it("transfer_nft with missing contract returns refusal", async () => {
