@@ -221,6 +221,28 @@ describe("runAction — get_nfts / transfer_nft guards", () => {
     assert.match(String(res), /omit it/i);
   });
 
+  it("transfer_nft refuses a padded fromAddress rather than trimming it", async () => {
+    // isAddress() trims internally, so " 0x… " passes the format check. The recipient guard
+    // above already refuses padding for exactly this reason — otherwise the padded value
+    // reaches the confirmation line ragged, which is the line the operator approves.
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const padded = ` ${resolved.address} `;
+    const res = await runAction(
+      { action: "transfer_nft", contractAddress: resolved.address, tokenId: "1",
+        to: resolved.address, fromAddress: padded },
+      resolved,
+    );
+    assert.match(String(res), /refused/i);
+    assert.match(String(res), /fromAddress/i);
+    // And the line the operator would have read must not carry the padding either.
+    const line = describeAction(
+      { action: "transfer_nft", contractAddress: resolved.address, tokenId: "1",
+        to: resolved.address, fromAddress: resolved.address },
+      resolved,
+    );
+    assert.ok(!/\(from {2}/.test(line), `confirmation line has doubled spacing: ${line}`);
+  });
+
   it("transfer_nft with missing contract returns refusal", async () => {
     const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
     const res = await runAction({ action: "transfer_nft", tokenId: "1", to: "0x1234567890abcdef1234567890abcdef12345678" }, resolved);
