@@ -200,7 +200,22 @@ node scripts/fetch-model.mjs <gguf-url>   # downloads into ./models
 
 ## Upgrade path (bigger agent)
 
-v0 uses a model-agnostic JSON-action protocol so it works even on a 360M dev model. On a capable model you can swap `src/tools.mjs` for either QVAC's **native tool-calling** (`completion({ tools:[…] })`) or the official **[`@tetherto/wdk-mcp-toolkit`](https://www.npmjs.com/package/@tetherto/wdk-mcp-toolkit)** MCP server (35 wallet tools — balance/send/swap/bridge/lending), which plugs straight into QVAC via `completion({ mcp:[…] })`. Register Monad with `server.registerWallet("monad", WalletManagerEvm, { provider })`.
+v0 uses a model-agnostic JSON-action protocol so it works even on a 360M dev model. On a capable
+model you can grow the toolset two ways:
+
+- QVAC's **native tool-calling** (`completion({ tools:[…] })`) — swap `src/tools.mjs`'s JSON
+  protocol for structured calls against the same nine built-in actions. Tracked in
+  [#15](https://github.com/portdeveloper/nad-agent/issues/15); not merged yet.
+- **MCP servers**, wired via `src/mcp.mjs` and `completion({ mcp:[…] })` — shipped. Point an
+  `mcp.json` (see `.env.example`'s `NAD_MCP_CONFIG`) at any MCP server's stdio command and QVAC
+  can call its tools directly, with each call still gated behind the same confirm/mainnet-ack
+  prompt every wallet write goes through. The official
+  **[`@tetherto/wdk-mcp-toolkit`](https://www.npmjs.com/package/@tetherto/wdk-mcp-toolkit)**
+  (35 wallet tools — balance/send/swap/bridge/lending) is the intended target here, registering
+  Monad with `server.registerWallet("monad", WalletManagerEvm, { provider })` — but as of this
+  writing the npm package is a reserved placeholder (`0.0.0`, no code), so `src/mcp.mjs` wires
+  any MCP server generically over stdio instead: point `mcp.json` at the real package the moment
+  it ships, no code changes needed.
 
 ## Verified
 
@@ -236,6 +251,7 @@ src/agent.mjs        QVAC local model: load / stream / unload
 src/addressBook.mjs  recipient resolution: alias → address
 src/tools.mjs        wallet actions + NL→action interpreter
 src/tokens.mjs       built-in ERC-20 token symbols for supported networks
+src/mcp.mjs          optional MCP server wiring (completion({ mcp }))
 src/cli.mjs          the REPL
 scripts/             doctor · gen-seed · fetch-model · build
 ```

@@ -22,6 +22,11 @@ import { stdin, stdout } from "node:process";
 // (multi-second) model load, so we defer it until the prompt is actually ready.
 let rl;
 
+// Connected MCP servers (see mcp.mjs). Populated in main() before the REPL starts;
+// module-level so statusBlock() (called from both banner() and /config) can read it
+// without threading it through every caller.
+let mcpClients = [];
+
 // ── scripted (non-TTY) mode ─────────────────────────────────────────────────
 // QVAC's worker inherits fd 0, so piped input used to race the REPL (BUILD_LOG
 // §4). In scripted mode we drain stdin to EOF *before* the worker ever spawns,
@@ -67,6 +72,7 @@ import { loadPolicy, hasRules } from "./policy.mjs";
 import * as wallet from "./wallet.mjs";
 import * as brain from "./agent.mjs";
 import { addressBookWarnings, formatRecipient, safeEcho } from "./addressBook.mjs";
+import { loadMcpConfig, connectMcpServers, disconnectMcpServers, summarizeMcpToolResult } from "./mcp.mjs";
 import {
   ACTIONS,
   systemPrompt,
@@ -143,6 +149,9 @@ function statusBlock() {
   );
   row("rpc", c.gray(config.chain.rpcUrl));
   row("gas", `${dot} ${gas}`);
+  if (mcpClients.length) {
+    row("mcp", c.green(`${mcpClients.length} server${mcpClients.length === 1 ? "" : "s"}`) + c.dim(" · " + mcpClients.map((s) => s.name).join(", ")));
+  }
 }
 
 function banner() {
@@ -198,6 +207,37 @@ async function confirm(question) {
   }
   const ans = raw.toLowerCase();
   return ans === "y" || ans === "yes";
+}
+
+/**
+ * Gate and run one MCP tool call. Every call goes through the same confirm +
+ * mainnet-ack gate as a wallet write: the tool catalog is whatever the connected
+ * MCP server exposes, discovered at runtime, so there is no reliable way to tell
+ * a read apart from a write here the way isWrite() does for the built-in actions
+ * — asking every time is the safe default, not a guess.
+ */
+async function invokeMcpToolCall(call) {
+  println("\n  " + c.yellow(`MCP tool: ${call.name}(${JSON.stringify(call.arguments ?? {})})`));
+  if (!(await confirmMainnetOnce())) {
+    return "Refused: mainnet was not acknowledged for this session.";
+  }
+  if (!(await confirm("  allow this tool call?"))) {
+    if (SCRIPTED) hadFailure = true;
+    return "Refused: the operator declined this tool call.";
+  }
+  if (typeof call.invoke !== "function") {
+    return `Refused: no handler is registered for MCP tool "${call.name}".`;
+  }
+  try {
+    const result = await call.invoke();
+    const summary = summarizeMcpToolResult(result);
+    println("  " + c.cyan(summary.replace(/\n/g, "\n  ")));
+    return summary;
+  } catch (err) {
+    println(c.red(`  MCP tool "${call.name}" failed: ${err.message}`));
+    if (SCRIPTED) hadFailure = true;
+    return `Error: MCP tool "${call.name}" failed: ${err.message}`;
+  }
 }
 
 /** Execute a parsed action, confirming writes. Returns nothing (prints results). */
@@ -480,6 +520,26 @@ async function main() {
   }
   for (const w of addressBookWarnings()) println("   " + c.yellow("address book: ") + w);
 
+  // 3) MCP servers — optional. No mcp.json means no servers, byte-identical to before.
+  let mcpConfig = null;
+  try {
+    mcpConfig = loadMcpConfig();
+  } catch (err) {
+    println(c.red(`   mcp: ${err.message}`) + "\n");
+    process.exit(1);
+  }
+  if (mcpConfig) {
+    printw(c.dim("   ") + c.violet("MCP") + c.dim(` · connecting ${mcpConfig.servers.length} server(s)… `));
+    mcpClients = await connectMcpServers(mcpConfig.servers, {
+      onWarn: (msg) => println("\n   " + c.yellow("mcp: ") + msg),
+    });
+    println(
+      mcpClients.length
+        ? c.green(`ok (${mcpClients.length}/${mcpConfig.servers.length})`)
+        : c.yellow("none connected"),
+    );
+  }
+
   println(
     "\n   " + c.dim("type ") + c.cyan("/help") + c.dim(" for commands, or just talk to it. ") + c.dim("Ctrl-C to quit.") + "\n"
   );
@@ -490,11 +550,49 @@ async function main() {
       return await handleSlash(line);
     }
 
-    // Natural language -> ask the local model for an action. The model's raw
-    // output (thinking + JSON) streams dimmed to the conversational surface;
-    // the executed result prints bright on stdout.
+    // Natural language -> ask the local model for an action.
     history.push({ role: "user", content: line });
     printw("  " + DIM);
+
+    if (mcpClients.length) {
+      // MCP servers are connected: let QVAC call their tools directly, feeding
+      // each result back for a follow-up turn (completeWithMcp owns that loop).
+      // The model's raw output streams dimmed; tool-call confirmations and
+      // results print bright, same as everything else that needs an operator.
+      let result;
+      try {
+        result = await brain.completeWithMcp(history, {
+          mcpClients,
+          onToken: (t) => printw(t),
+          invokeToolCall: async (call) => {
+            printw(RST + "\n");
+            const out = await invokeMcpToolCall(call);
+            printw(DIM);
+            return out;
+          },
+        });
+        printw(RST + "\n");
+      } catch (err) {
+        printw(RST);
+        println(c.red(`  model error: ${err.message}`) + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      history.push({ role: "assistant", content: result.text });
+      for (const e of result.toolErrors) {
+        println(c.red(`  tool error [${e.code}]: ${e.message}`));
+        if (SCRIPTED) hadFailure = true;
+      }
+      if (result.limitReached) {
+        println(c.yellow(`  (stopped after ${result.rounds} tool-call rounds — the model kept calling tools)`));
+        if (SCRIPTED) hadFailure = true;
+      }
+      println("");
+      return true;
+    }
+
+    // v0 JSON protocol: the model's raw output (thinking + JSON) streams dimmed
+    // to the conversational surface; the executed result prints bright on stdout.
     let raw = "";
     try {
       raw = await brain.complete(history, (t) => printw(t));
@@ -549,6 +647,7 @@ async function main() {
   }
 
   await brain.unloadBrain().catch(() => {});
+  await disconnectMcpServers(mcpClients);
   wallet.dispose();
   rl?.close();
   if (SCRIPTED) {

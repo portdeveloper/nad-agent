@@ -55,6 +55,7 @@ npm start                   # interactive REPL
 - `src/agent.mjs` — QVAC: load / stream / unload the local model
 - `src/addressBook.mjs` — recipient resolution: alias → address, validation, refusals
 - `src/tools.mjs` — wallet actions + NL→action interpreter (v0 JSON protocol)
+- `src/mcp.mjs` — optional MCP server wiring (`completion({ mcp })`) — see `mcp.json`
 - `src/cli.mjs` — the interactive REPL / TUI
 - `scripts/` — doctor · gen-seed · fetch-model · build
 
