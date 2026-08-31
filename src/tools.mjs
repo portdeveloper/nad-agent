@@ -981,16 +981,22 @@ export async function runAction(a, resolved, opts = {}) {
       // inside the wallet instead of the `Refused:` line every other rejection here produces.
       // An empty string did the same, because "" is only falsy at the call site — it still
       // reaches checksumAddress. Refuse before the wallet is touched, like the two above.
-      if (a.fromAddress !== undefined && a.fromAddress !== null) {
-        const fromAddress = String(a.fromAddress);
+      // Same rule the recipient above follows: padding is refused rather than trimmed,
+      // because isAddress() trims internally, so " 0x… " would pass the check and then reach
+      // the confirmation line ragged. Whatever is validated here is also what gets passed on,
+      // rather than re-reading a.fromAddress — an array or an object stringifies to a valid
+      // address for the check and travels onward as itself otherwise.
+      let fromAddress = a.fromAddress;
+      if (fromAddress !== undefined && fromAddress !== null) {
+        fromAddress = String(fromAddress);
         if (fromAddress.trim() === "") {
           return "Refused: fromAddress was given but empty — omit it to send from your own wallet.";
         }
-        if (!isAddress(fromAddress)) {
+        if (!isAddress(fromAddress) || fromAddress !== fromAddress.trim()) {
           return `Refused: "${safeEcho(fromAddress)}" is not a valid fromAddress.`;
         }
       }
-      const res = await wallet.transferNft(to, contract, String(a.tokenId), a.fromAddress);
+      const res = await wallet.transferNft(to, contract, String(a.tokenId), fromAddress);
       const label = `#${a.tokenId} (${contract})`;
 
       if (res.dryRun) {
