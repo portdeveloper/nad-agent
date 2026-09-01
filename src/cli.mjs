@@ -499,30 +499,78 @@ async function main() {
 
     try {
       if (config.useNativeTools) {
-        // Native tool-calling path
-        const result = await brain.completeWithTools(history, getToolDefinitions(), (t) => printw(t));
-        printw(RST + "\n");
+        // Native tool-calling path: loop until the model stops calling tools.
+        const MAX_TOOL_CALLS = 10; // Finite call limit to prevent infinite loops.
+        let totalToolCalls = 0;
 
-        // Add assistant turn to history (use text or note that tool calls were made)
-        const assistantContent = result.text || `[tool calls: ${result.toolCalls.map((c) => c.name).join(", ")}]`;
-        history.push({ role: "assistant", content: assistantContent });
+        for (let turnCount = 0; turnCount < 10; turnCount++) {
+          const result = await brain.completeWithTools(history, getToolDefinitions(), (t) => printw(t));
+          printw(RST + "\n");
 
-        if (result.toolCalls && result.toolCalls.length > 0) {
-          // Dispatch each tool call
-          for (const toolCall of result.toolCalls) {
-            // Convert tool call to action for handleAction validation/confirmation flow
-            const action = { action: toolCall.name, ...toolCall.arguments };
-            const handled = await handleAction(action);
-            if (!handled) {
-              // Should not happen for writes, but just in case
-              println("");
+          // Add assistant turn to history with its text and/or tool calls.
+          const assistantContent = result.text || `[tool calls: ${result.toolCalls.map((c) => c.name).join(", ")}]`;
+          history.push({ role: "assistant", content: assistantContent });
+
+          // Surface tool call errors to the user.
+          if (result.toolErrors && result.toolErrors.length > 0) {
+            for (const toolErr of result.toolErrors) {
+              println(c.red(`  tool error: ${toolErr.error || "malformed tool call"}`));
+              if (SCRIPTED) hadFailure = true;
             }
+            break; // Do not continue the loop if there were errors.
           }
-        } else if (result.text) {
-          // Model just chatted, text already streamed
-          println("");
-        } else {
-          println("");
+
+          if (result.toolCalls && result.toolCalls.length > 0) {
+            totalToolCalls += result.toolCalls.length;
+            if (totalToolCalls > MAX_TOOL_CALLS) {
+              println(c.red(`  tool call limit (${MAX_TOOL_CALLS}) exceeded; stopping.`) + "\n");
+              if (SCRIPTED) hadFailure = true;
+              break;
+            }
+
+            // Dispatch each tool call and collect results for history.
+            const toolResults = [];
+            for (const toolCall of result.toolCalls) {
+              const action = { action: toolCall.name, ...toolCall.arguments };
+              let execResult = null;
+
+              try {
+                // Use dispatchToolCall to execute without confirmation flow.
+                // handleAction is skipped here so we collect the raw result.
+                execResult = await dispatchToolCall(toolCall.name, toolCall.arguments);
+              } catch (err) {
+                execResult = `Error: ${err.message || String(err)}`;
+                if (SCRIPTED) hadFailure = true;
+              }
+
+              if (execResult) {
+                println("  " + c.cyan(execResult.replace(/\n/g, "\n  ")) + "\n");
+              }
+
+              toolResults.push({
+                toolCallId: toolCall.id,
+                toolName: toolCall.name,
+                result: execResult || "",
+              });
+            }
+
+            // Add tool results to history as a tool message.
+            if (toolResults.length > 0) {
+              history.push({
+                role: "tool",
+                content: toolResults.map((r) => `${r.toolName}: ${r.result}`).join("\n"),
+              });
+              // Continue the loop to let the model respond with the tool results.
+            }
+          } else if (result.text) {
+            // Model just chatted, no tool calls. Text already streamed.
+            println("");
+            break;
+          } else {
+            // No text, no tool calls — model produced nothing.
+            println("");
+            break;
+          }
         }
       } else {
         // v0 JSON protocol path (fallback)
