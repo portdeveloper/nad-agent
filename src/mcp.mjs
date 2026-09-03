@@ -14,6 +14,12 @@
  * "Upgrade path") is reserved on npm but has not shipped real code yet — this file
  * wires any MCP server generically over stdio, so pointing `command`/`args` at the
  * real package will work the moment it ships, with no code changes here.
+ *
+ * A server's `env` block is additive, not inherited: each configured server gets
+ * only the MCP SDK's own minimal default environment plus whatever variables are
+ * explicitly named in its own `env` — never this process's full environment (which
+ * holds WDK_SEED, PIMLICO_API_KEY, and every other credential the agent has). See
+ * buildStdioTransportOptions() below.
  */
 
 import { readFileSync } from "node:fs";
@@ -90,6 +96,33 @@ const mcpClientModule = () => import("@modelcontextprotocol/sdk/client/index.js"
 const mcpStdioModule = () => import("@modelcontextprotocol/sdk/client/stdio.js");
 
 /**
+ * Build the { command, args, env } passed to StdioClientTransport for one server.
+ *
+ * This must NOT start from process.env: every configured server is an arbitrary
+ * child process — often an `npx` package this repo does not control — and
+ * process.env carries WDK_SEED, PIMLICO_API_KEY, RESERVOIR_API_KEY, and every
+ * other credential this agent holds, all readable by that child before the
+ * first tool confirmation ever runs. Instead this starts from the MCP SDK's
+ * own minimal default (`getDefaultEnvironment()` — HOME/LOGNAME/PATH/SHELL/
+ * TERM/USER on POSIX, the Windows equivalents there) and layers on only the
+ * variables the operator explicitly listed in that server's own `env` block
+ * in mcp.json. A secret reaches a server only if it was named there, on
+ * purpose, for that server specifically.
+ *
+ * `getDefaultEnv` is a test seam: it defaults to the real SDK function
+ * (imported lazily, same rule as the rest of this module) but a test can
+ * inject a fixed allowlist to assert on the merge without touching the SDK.
+ */
+export async function buildStdioTransportOptions(server, { getDefaultEnv } = {}) {
+  const resolveDefaultEnv = getDefaultEnv ?? (await mcpStdioModule()).getDefaultEnvironment;
+  return {
+    command: server.command,
+    args: server.args,
+    env: { ...resolveDefaultEnv(), ...server.env },
+  };
+}
+
+/**
  * Connect to every configured server over stdio. Best-effort, like loadBrain():
  * a server that fails to start is reported via onWarn and skipped rather than
  * stopping the whole agent — the rest of the toolset (slash-commands, other
@@ -102,11 +135,7 @@ export async function connectMcpServers(servers, { onWarn } = {}) {
   for (const s of servers) {
     try {
       const client = new Client({ name: `nad-agent (${s.name})`, version: "1.0.0" });
-      const transport = new StdioClientTransport({
-        command: s.command,
-        args: s.args,
-        env: { ...process.env, ...s.env },
-      });
+      const transport = new StdioClientTransport(await buildStdioTransportOptions(s));
       await client.connect(transport);
       connected.push({ name: s.name, client });
     } catch (err) {

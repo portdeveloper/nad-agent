@@ -1,9 +1,15 @@
-import { test, describe } from "node:test";
+import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadMcpConfig, summarizeMcpToolResult, connectMcpServers, disconnectMcpServers } from "../src/mcp.mjs";
+import {
+  loadMcpConfig,
+  summarizeMcpToolResult,
+  connectMcpServers,
+  disconnectMcpServers,
+  buildStdioTransportOptions,
+} from "../src/mcp.mjs";
 
 function mcpConfigFile(contents) {
   const dir = mkdtempSync(join(tmpdir(), "nad-mcp-"));
@@ -99,6 +105,52 @@ describe("summarizeMcpToolResult", () => {
   test("content array with no text blocks falls back to JSON", () => {
     const result = { content: [{ type: "image", data: "abc" }] };
     assert.equal(summarizeMcpToolResult(result), JSON.stringify(result));
+  });
+});
+
+describe("buildStdioTransportOptions — a configured server must not see this process's secrets", () => {
+  const SENTINELS = { WDK_SEED: "sentinel wdk seed — must never reach a child", PIMLICO_API_KEY: "sentinel pimlico key" };
+  let saved;
+
+  beforeEach(() => {
+    saved = { WDK_SEED: process.env.WDK_SEED, PIMLICO_API_KEY: process.env.PIMLICO_API_KEY };
+    Object.assign(process.env, SENTINELS);
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  test("with an injected default-env seam: only that server's explicit env survives, never process.env", async () => {
+    const fakeDefaultEnv = () => ({ PATH: "/usr/bin" }); // a stand-in for the SDK's own minimal allowlist
+    const opts = await buildStdioTransportOptions(
+      { name: "s", command: "node", args: ["server.js"], env: { PUBLIC_FLAG: "1" } },
+      { getDefaultEnv: fakeDefaultEnv },
+    );
+    assert.deepEqual(opts, { command: "node", args: ["server.js"], env: { PATH: "/usr/bin", PUBLIC_FLAG: "1" } });
+    assert.equal(opts.env.WDK_SEED, undefined, "the wallet seed must not leak to a configured server");
+    assert.equal(opts.env.PIMLICO_API_KEY, undefined, "the paymaster key must not leak to a configured server");
+  });
+
+  test("against the real MCP SDK default env: process.env secrets are absent unless explicitly listed", async () => {
+    const opts = await buildStdioTransportOptions({ name: "s", command: "node", args: [], env: {} });
+    assert.equal(opts.env.WDK_SEED, undefined, "process.env.WDK_SEED must not be forwarded by default");
+    assert.equal(opts.env.PIMLICO_API_KEY, undefined, "process.env.PIMLICO_API_KEY must not be forwarded by default");
+    // The SDK's own minimal allowlist (PATH etc.) is still there, so the child can actually run.
+    assert.ok(opts.env.PATH, "the SDK's own safe default env (PATH) must still be present");
+  });
+
+  test("a secret reaches a server only when the operator names it in that server's own env", async () => {
+    const opts = await buildStdioTransportOptions({
+      name: "s",
+      command: "node",
+      args: [],
+      env: { WDK_SEED: process.env.WDK_SEED },
+    });
+    assert.equal(opts.env.WDK_SEED, SENTINELS.WDK_SEED, "explicit opt-in must still work");
+    assert.equal(opts.env.PIMLICO_API_KEY, undefined, "an unlisted secret must still be absent");
   });
 });
 
