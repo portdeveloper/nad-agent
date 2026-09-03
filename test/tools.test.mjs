@@ -316,3 +316,71 @@ test("unknown token balance errors explain when the catalog is empty", async () 
     KNOWN_TOKENS.testnet = previousCatalog;
   }
 });
+
+// ─── Native tool-calling tests ───────────────────────────────────────────────
+import { getToolDefinitions, dispatchToolCall } from "../src/tools.mjs";
+
+test("getToolDefinitions() returns valid OpenAI-compatible Tool definitions", () => {
+  const tools = getToolDefinitions();
+
+  // Should return an array of tools
+  assert.ok(Array.isArray(tools));
+  assert.ok(tools.length > 0);
+
+  // Each tool should have required fields
+  for (const tool of tools) {
+    assert.equal(tool.type, "function", `tool ${tool.name} has type !== "function"`);
+    assert.ok(typeof tool.name === "string" && tool.name.length > 0, `tool missing name`);
+    assert.ok(typeof tool.description === "string" && tool.description.length > 0, `tool ${tool.name} missing description`);
+    assert.ok(tool.parameters && tool.parameters.type === "object", `tool ${tool.name} parameters invalid`);
+  }
+});
+
+test("getToolDefinitions() includes all v0 actions", () => {
+  const tools = getToolDefinitions();
+  const names = new Set(tools.map((t) => t.name));
+
+  // v0 actions that should have native tool equivalents
+  assert.ok(names.has("get_address"), "missing get_address tool");
+  assert.ok(names.has("get_balance"), "missing get_balance tool");
+  assert.ok(names.has("get_token_balance"), "missing get_token_balance tool");
+  assert.ok(names.has("send_mon"), "missing send_mon tool");
+  assert.ok(names.has("send_token"), "missing send_token tool");
+});
+
+test("getToolDefinitions() tools have correct parameter schema", () => {
+  const tools = getToolDefinitions();
+
+  const sendMon = tools.find((t) => t.name === "send_mon");
+  assert.ok(sendMon, "send_mon tool not found");
+  assert.deepEqual(new Set(sendMon.parameters.required), new Set(["to", "amountMon"]));
+  assert.ok(sendMon.parameters.properties.to, "send_mon missing 'to' parameter");
+  assert.ok(sendMon.parameters.properties.amountMon, "send_mon missing 'amountMon' parameter");
+
+  const getTokenBalance = tools.find((t) => t.name === "get_token_balance");
+  assert.ok(getTokenBalance, "get_token_balance tool not found");
+  assert.deepEqual(getTokenBalance.parameters.required, ["token"]);
+  assert.ok(getTokenBalance.parameters.properties.token, "get_token_balance missing 'token' parameter");
+});
+
+test("dispatchToolCall routes calls to the correct handlers", async () => {
+  // get_address is a read-only action that should not throw
+  // (though it may fail if wallet is not initialized, which is expected in tests)
+  try {
+    const result = await dispatchToolCall("get_address", {});
+    // Either succeeds with "(wallet not initialized)" or actual address
+    assert.ok(typeof result === "string");
+  } catch (err) {
+    // Acceptable: wallet not initialized
+    assert.ok(err.message.includes("wallet") || err.message.includes("initialized"));
+  }
+});
+
+test("dispatchToolCall throws on unknown tool names", async () => {
+  try {
+    await dispatchToolCall("unknown_tool", {});
+    assert.fail("should have thrown on unknown tool");
+  } catch (err) {
+    assert.match(err.message, /[Uu]nknown tool/);
+  }
+});

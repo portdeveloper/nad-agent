@@ -71,6 +71,37 @@ export async function complete(history, onToken) {
   return out;
 }
 
+/**
+ * Run a completion with native tool-calling.
+ * Returns { text, toolCalls, toolErrors } where toolCalls is an array of { id, name, arguments }
+ * and toolErrors is an array of { toolCallId, error, details }.
+ */
+export async function completeWithTools(history, tools, onToken) {
+  const { completion } = await qvac();
+  const run = completion({ modelId, history, tools, stream: true }, { timeout: 300_000 });
+  let text = "";
+  const toolCalls = [];
+  const toolErrors = [];
+
+  try {
+    for await (const event of run.events) {
+      if (event.type === "contentDelta") {
+        text += event.text;
+        if (onToken) onToken(event.text);
+      } else if (event.type === "toolCall") {
+        toolCalls.push(event.call);
+      } else if (event.type === "toolCallError") {
+        toolErrors.push(event);
+      }
+    }
+  } catch (err) {
+    // A model-side error must not crash the agent, but surface it to the caller.
+    throw err;
+  }
+
+  return { text, toolCalls, toolErrors };
+}
+
 export async function unloadBrain() {
   if (!modelId) return;
   const { unloadModel } = await qvac();
