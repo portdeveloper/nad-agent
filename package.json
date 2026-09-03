@@ -19,6 +19,7 @@
     "dev": "node scripts/build.mjs && node --env-file-if-exists=.env dist/cli.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "@qvac/sdk": "^0.14.1",
     "@tetherto/wdk": "1.0.0-beta.12",
     "@tetherto/wdk-wallet-evm-erc-4337": "1.0.0-beta.9",

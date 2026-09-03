@@ -71,6 +71,76 @@ export async function complete(history, onToken) {
   return out;
 }
 
+/**
+ * Run a completion against one or more connected MCP servers (see mcp.mjs),
+ * feeding each tool call's result back into `history` and re-completing until
+ * the model stops calling tools — or `maxToolRounds` is hit, so a runaway
+ * tool-call loop cannot hang the agent forever.
+ *
+ * `invokeToolCall(call)` executes one call and must resolve to a string for
+ * history; this function has no UI, so confirmation/refusal is entirely the
+ * caller's decision (cli.mjs gates every call behind a y/N prompt).
+ *
+ * `runCompletion` is a test seam — it defaults to QVAC's own `completion()`,
+ * lazily imported like every other QVAC call in this file, but a caller can
+ * inject a fake `{ events, final }` producer to drive the loop without a
+ * live model or MCP server.
+ *
+ * Never throws on a model-side error (same rule as complete()); returns
+ * `{ text, rounds, toolErrors, limitReached }` so the caller can decide how
+ * to report a stopped model, a tool error, or a hit round limit.
+ */
+export async function completeWithMcp(
+  history,
+  { mcpClients = [], onToken, invokeToolCall, maxToolRounds = 8, runCompletion } = {},
+) {
+  const doCompletion = runCompletion ?? (await qvac()).completion;
+  const mcp = mcpClients.map((c) => ({ client: c.client, includeResources: false }));
+  const toolErrors = [];
+  let text = "";
+  let rounds = 0;
+
+  for (;;) {
+    const run = doCompletion({ modelId, history, mcp, stream: true }, { timeout: 300_000 });
+    try {
+      for await (const event of run.events) {
+        if (event.type === "contentDelta") {
+          if (onToken) onToken(event.text);
+        } else if (event.type === "toolError") {
+          toolErrors.push(event.error);
+        }
+      }
+    } catch (err) {
+      if (onToken) onToken(`\n[model stopped: ${err.code || err.message}]`);
+      return { text, rounds, toolErrors, limitReached: false };
+    }
+
+    const final = await run.final;
+    text = final.contentText ?? final.raw?.fullText ?? "";
+    const toolCalls = final.toolCalls ?? [];
+    if (toolCalls.length === 0) {
+      return { text, rounds, toolErrors, limitReached: false };
+    }
+
+    rounds++;
+    if (rounds > maxToolRounds) {
+      return { text, rounds: rounds - 1, toolErrors, limitReached: true };
+    }
+
+    // Intermediate turns are internal to the loop and not otherwise visible, so
+    // they are pushed here; the final round's assistant text is left for the
+    // caller to push, matching how complete() leaves that to its caller too.
+    history.push({ role: "assistant", content: text });
+    for (const call of toolCalls) {
+      if (!invokeToolCall) {
+        throw new Error("completeWithMcp: invokeToolCall is required when the model calls a tool");
+      }
+      const result = await invokeToolCall(call);
+      history.push({ role: "tool", content: String(result ?? "") });
+    }
+  }
+}
+
 export async function unloadBrain() {
   if (!modelId) return;
   const { unloadModel } = await qvac();

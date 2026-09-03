@@ -19,3 +19,4 @@ models/
 .DS_Store
 *.log
 policy.json
+mcp.json
