@@ -72,6 +72,7 @@ import {
   systemPrompt,
   parseAction,
   runAction,
+  isRefusal,
   describeAction,
   isWrite,
   previewSend,
@@ -334,17 +335,21 @@ async function handleAction(action) {
   }
   try {
     const out = await runAction(action, resolved, { preparedToken, preview: swapPreview });
+    const refused = isRefusal(out);
     // Only native amounts count against the session budget; token amounts are
     // not denominated in MON, so the policy governs their recipient only. A
     // refusal from runAction must not consume budget, and a dry run does count:
     // the budget bounds what the agent attempts, not only what settles.
-    if (action.action === "send_mon" && resolved && !String(out ?? "").startsWith("Refused:")) {
+    if (action.action === "send_mon" && resolved && !refused) {
       sessionSpent += parseMon(action.amountMon);
     }
-    if (action.action === "swap" && swapPreview?.nativeIn && !String(out ?? "").startsWith("Refused:")) {
+    if (action.action === "swap" && swapPreview?.nativeIn && !refused) {
       sessionSpent += parseMon(action.amountIn);
     }
     if (out != null) console.log("  " + c.cyan(out.replace(/\n/g, "\n  ")) + "\n");
+    // A refusal returned as a string is a failure too, same as the throw below;
+    // in scripted mode it must set the exit code so a CI script can see it.
+    if (SCRIPTED && refused) hadFailure = true;
   } catch (err) {
     console.log(c.red(`  error: ${err.message}`) + "\n");
     if (SCRIPTED) hadFailure = true;
