@@ -9,7 +9,7 @@
  * wallet is actually needed (and so the doctor/help paths work without it).
  */
 
-import { Contract, JsonRpcProvider, getAddress as checksumAddress } from "ethers";
+import { Contract, Interface, JsonRpcProvider, getAddress as checksumAddress } from "ethers";
 import { config, setAccountIndex } from "./config.mjs";
 
 let manager = null;
@@ -28,7 +28,7 @@ const ERC20_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
 ];
 
-const ERC721_ABI = [
+export const ERC721_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
   "function ownerOf(uint256 tokenId) view returns (address)",
   "function tokenURI(uint256 tokenId) view returns (string)",
@@ -339,6 +339,18 @@ export async function getNfts(ownerAddress = address) {
 }
 
 /**
+ * Calldata for one `safeTransferFrom`. Split out so the encoding is reachable
+ * from a test without a wallet or a network, the way buildSwapCalls is.
+ */
+export function buildNftTransferCalldata(fromAddress, to, tokenId) {
+  return new Interface(ERC721_ABI).encodeFunctionData("safeTransferFrom", [
+    checksumAddress(fromAddress),
+    checksumAddress(to),
+    BigInt(tokenId),
+  ]);
+}
+
+/**
  * Broadcast (or, in dry-run, simulate) an ERC-721 transfer via safeTransferFrom.
  *
  * Verifies `fromAddress` actually owns the token first — a wrong owner is refused
@@ -355,11 +367,7 @@ export async function transferNft(to, contractAddress, tokenId, fromAddress = ad
       `Refused: ${fromAddress} does not own token #${tokenId} on ${contractAddress} — owner is ${owner}`,
     );
   }
-  const data = new Interface(ERC721_ABI).encodeFunctionData("safeTransferFrom", [
-    checksumAddress(fromAddress),
-    checksumAddress(to),
-    BigInt(tokenId),
-  ]);
+  const data = buildNftTransferCalldata(fromAddress, to, tokenId);
   const target = checksumAddress(contractAddress);
   if (config.gasMode === "dry-run") {
     let fee = 0n;
