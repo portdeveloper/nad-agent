@@ -10,7 +10,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseAction, describeAction, runAction, isWrite, ACTIONS } from "../src/tools.mjs";
+import { parseAction, describeAction, runAction, isWrite, ACTIONS, systemPrompt } from "../src/tools.mjs";
 import { buildNftTransferCalldata, ERC721_ABI, normalizeNftPage } from "../src/wallet.mjs";
 import { Interface, getAddress } from "ethers";
 import { config } from "../src/config.mjs";
@@ -158,6 +158,26 @@ describe("describeAction — get_nfts / transfer_nft", () => {
 // runAction — guards
 // ---------------------------------------------------------------------------
 
+describe("transfer_nft — model-facing signature", () => {
+  it("systemPrompt offers fromAddress, marked optional", () => {
+    // desc has always told the model it may pass fromAddress, but systemPrompt() builds the
+    // signature from args, so the parameter never appeared in the list the model reads.
+    // It cannot go in args itself: hasRequiredArgs() treats every entry there as mandatory,
+    // which would break every transfer that legitimately omits it.
+    const line = systemPrompt().split("\n").find((l) => l.includes("transfer_nft("));
+    assert.ok(line, "systemPrompt should list transfer_nft");
+    assert.ok(line.includes("fromAddress?"), `fromAddress missing or unmarked in: ${line}`);
+  });
+
+  it("omitting fromAddress still parses as a complete action", () => {
+    const parsed = parseAction(
+      '{"action":"transfer_nft","to":"0x1234567890abcdef1234567890abcdef12345678",' +
+      '"contractAddress":"0x1234567890abcdef1234567890abcdef12345678","tokenId":"7"}',
+    );
+    assert.equal(parsed.action, "transfer_nft");
+  });
+});
+
 describe("runAction — get_nfts / transfer_nft guards", () => {
   it("get_nfts with invalid address returns refusal", async () => {
     const res = await runAction({ action: "get_nfts", address: "not-an-address" });
@@ -167,6 +187,81 @@ describe("runAction — get_nfts / transfer_nft guards", () => {
   it("transfer_nft with invalid to returns refusal", async () => {
     const res = await runAction({ action: "transfer_nft", contractAddress: "0xabc", tokenId: "1", to: "not-an-address" });
     assert.match(String(res), /refused/i);
+  });
+
+  it("transfer_nft refuses a malformed fromAddress instead of throwing", async () => {
+    // fromAddress was the one field on this path that reached ethers unchecked: a garbage
+    // value came back as a raw `invalid address (argument="address"…)` throw from inside the
+    // wallet rather than the Refused: line every other rejection here produces. The refusal
+    // has to happen before the wallet is touched, which is also why this needs no wallet.
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const res = await runAction(
+      { action: "transfer_nft", contractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+        tokenId: "1", to: resolved.address, fromAddress: "not-an-address" },
+      resolved,
+    );
+    assert.match(String(res), /refused/i);
+    assert.match(String(res), /fromAddress/i);
+  });
+
+  it("transfer_nft refuses an empty fromAddress rather than silently sending from self", async () => {
+    // "" is falsy only at the call site — the default parameter never kicks in, so it still
+    // reaches checksumAddress. Refusing beats quietly transferring from the agent's own
+    // wallet when the caller clearly meant to name a different owner.
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const res = await runAction(
+      { action: "transfer_nft", contractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+        tokenId: "1", to: resolved.address, fromAddress: "" },
+      resolved,
+    );
+    assert.match(String(res), /refused/i);
+    // isAddress() alone would already refuse this, but as `Refused: "" is not a valid
+    // fromAddress` — a pair of quotes and no explanation. The separate branch exists for the
+    // message, so assert the message, not just that something was refused.
+    assert.match(String(res), /empty/i);
+    assert.match(String(res), /omit it/i);
+  });
+
+  it("transfer_nft refuses a padded fromAddress rather than trimming it", async () => {
+    // isAddress() trims internally, so " 0x… " passes the format check. The recipient guard
+    // above already refuses padding for exactly this reason — otherwise the padded value
+    // reaches the confirmation line ragged, which is the line the operator approves.
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const padded = ` ${resolved.address} `;
+    const res = await runAction(
+      { action: "transfer_nft", contractAddress: resolved.address, tokenId: "1",
+        to: resolved.address, fromAddress: padded },
+      resolved,
+    );
+    assert.match(String(res), /refused/i);
+    assert.match(String(res), /fromAddress/i);
+    // The line the operator reads is rendered before runAction runs, so a late refusal does
+    // not save it — feed the padded value to describeAction directly and require it clean.
+    const line = describeAction(
+      { action: "transfer_nft", contractAddress: resolved.address, tokenId: "1",
+        to: resolved.address, fromAddress: padded },
+      resolved,
+    );
+    assert.ok(!/\(from {2}/.test(line), `confirmation line has doubled spacing: ${line}`);
+    assert.ok(!line.includes(`${padded})`), `padding survived into: ${line}`);
+  });
+
+  it("describeAction neutralises control characters in fromAddress", async () => {
+    // This is the line the operator reads and approves, and runAction's refusal happens
+    // only afterwards — so whatever describeAction renders is what a person acts on. An
+    // unsanitised value carrying ESC[2K (erase line) or CR could rewrite what was already
+    // printed, immediately above the confirm prompt. safeEcho keeps the line printable.
+    const ESC = String.fromCharCode(27);
+    const CR = String.fromCharCode(13);
+    const resolved = { ok: true, address: "0x1234567890abcdef1234567890abcdef12345678", name: null };
+    const hostile = `${resolved.address.slice(0, 20)}${ESC}[2K${CR}Send NFT to attacker`;
+    const line = describeAction(
+      { action: "transfer_nft", contractAddress: resolved.address, tokenId: "1",
+        to: resolved.address, fromAddress: hostile },
+      resolved,
+    );
+    assert.ok(!line.includes(ESC), "ESC survived into the confirmation line");
+    assert.ok(!line.includes(CR), "CR survived into the confirmation line");
   });
 
   it("transfer_nft with missing contract returns refusal", async () => {
