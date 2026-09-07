@@ -2,12 +2,14 @@
  * Unit tests for scripts/fetch-model.mjs.
  *
  * Uses node:test + node:assert (built into Node 22). Zero new dependencies.
- * Mocks fetch via injected factories — no network. Files go to /tmp.
+ * Mocks fetch via injected factories — no network. Files go to the OS temp dir.
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
   GGUFDownloader,
@@ -44,7 +46,7 @@ function streamFromBuffer(buf) {
 
 let _id = 0;
 function path(prefix) {
-  return `/tmp/nad-${prefix}-${++_id}.gguf`;
+  return join(tmpdir(), `nad-${prefix}-${++_id}.gguf`);
 }
 
 function cleanup(file) {
@@ -390,7 +392,7 @@ describe("computeMD5", () => {
   });
 
   it("returns empty string for missing file", async () => {
-    assert.equal(computeMD5("/tmp/nonexistent-file-12345.gguf"), "");
+    assert.equal(computeMD5(join(tmpdir(), "nonexistent-file-12345.gguf")), "");
   });
 });
 
