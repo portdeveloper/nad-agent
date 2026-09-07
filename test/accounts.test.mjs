@@ -258,8 +258,12 @@ describe("persistence — setAccountIndex", () => {
   it("round-trips across a fresh module import (getAccountIndex)", async () => {
     await setAccountIndex(7);
     const result = execSync(
-      `NAD_STATE_PATH="${TEST_STATE_PATH}" node --input-type=module -e 'import { getAccountIndex } from "./src/config.mjs"; console.log(getAccountIndex())'`,
-      { cwd: process.cwd(), encoding: "utf8" },
+      `node --input-type=module -e "import { getAccountIndex } from './src/config.mjs'; console.log(getAccountIndex())"`,
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { ...process.env, NAD_STATE_PATH: TEST_STATE_PATH },
+      },
     ).trim();
     assert.equal(result, "7", "fresh process should read persisted index");
   });
@@ -286,8 +290,12 @@ describe("persistence — setAccountIndex", () => {
     writeFileSync(TEST_STATE_PATH, "NOT JSON{{{[");
     // Re-import config module to trigger readState with bad file.
     const result = execSync(
-      `NAD_STATE_PATH="${TEST_STATE_PATH}" node --input-type=module -e 'import { getAccountIndex } from "./src/config.mjs"; console.log(getAccountIndex())'`,
-      { cwd: process.cwd(), encoding: "utf8" },
+      `node --input-type=module -e "import { getAccountIndex } from './src/config.mjs'; console.log(getAccountIndex())"`,
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { ...process.env, NAD_STATE_PATH: TEST_STATE_PATH },
+      },
     ).trim();
     assert.equal(result, "0", "corrupted state.json should fall back to default (0)");
   });
