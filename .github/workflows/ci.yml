@@ -8,7 +8,14 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Both OSes report, so a Windows-only break is visible without
+    # hiding the Linux result behind it.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
