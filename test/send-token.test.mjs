@@ -156,6 +156,95 @@ describe("runAction — send_token guard", () => {
 });
 
 // ---------------------------------------------------------------------------
+// runAction — the receipt printed after the send (Issue #89)
+// ---------------------------------------------------------------------------
+
+describe("runAction — send_token receipt", () => {
+  const SEND = { action: "send_token", token: NO_SYMBOL_TOKEN, to: DEAD, amount: "1" };
+  const RESOLVED = { ok: true, address: DEAD, name: null };
+
+  /** A token that answers decimals() and not symbol(), so prepareTokenSend stands the
+   *  contract address in for the symbol — the case #87 fixed the bound for. */
+  async function prepared(symbol) {
+    const metadata = { address: NO_SYMBOL_TOKEN, decimals: 18, ...(symbol ? { symbol } : {}) };
+    const p = await prepareTokenSend(SEND, { getMetadata: async () => metadata });
+    assert.equal(p.ok, true);
+    assert.equal(p.token.symbol, symbol ?? NO_SYMBOL_TOKEN);
+    return p;
+  }
+
+  /** The first line is the one carrying the label. Asserting on the whole receipt would
+   *  pass even with a truncated label, because a later line prints the contract address
+   *  in full — the assertion has to look where the value under test actually is. */
+  const labelLine = (receipt) => receipt.split("\n")[0];
+
+  it("passes the seam exactly what the wallet call received, and keeps the address whole in the dry-run receipt", async () => {
+    const p = await prepared();
+    const calls = [];
+    const out = await runAction(SEND, RESOLVED, {
+      preparedToken: p,
+      sendToken: async (...args) => {
+        calls.push(args);
+        return { dryRun: true, to: DEAD, token: NO_SYMBOL_TOKEN, value: p.amountWei, fee: 0n };
+      },
+    });
+
+    assert.deepEqual(calls, [[DEAD, NO_SYMBOL_TOKEN, p.amountWei]],
+      "the seam must be handed the same three arguments the wallet call took");
+    const line = labelLine(out);
+    assert.match(line, /^DRY RUN/);
+    assert.ok(line.includes(NO_SYMBOL_TOKEN), `address was cut in the dry-run receipt: ${line}`);
+  });
+
+  it("keeps the address whole in the sent receipt", async () => {
+    const p = await prepared();
+    const out = await runAction(SEND, RESOLVED, {
+      preparedToken: p,
+      sendToken: async () => ({ userOpHash: "0xuserop", hash: "0xtx", fee: 0n }),
+    });
+
+    const line = labelLine(out);
+    assert.match(line, /^Sent/);
+    assert.ok(line.includes(NO_SYMBOL_TOKEN), `address was cut in the sent receipt: ${line}`);
+    assert.match(out, /tx: +0xtx/);
+    assert.match(out, /userOp: +0xuserop/);
+  });
+
+  it("keeps the address whole in the submitted receipt", async () => {
+    const p = await prepared();
+    const out = await runAction(SEND, RESOLVED, {
+      preparedToken: p,
+      // Broadcast, but the receipt did not land inside the wait window: no hash.
+      sendToken: async () => ({ userOpHash: "0xuserop", hash: undefined, fee: 0n }),
+    });
+
+    const line = labelLine(out);
+    assert.match(line, /^Submitted/);
+    assert.ok(line.includes(NO_SYMBOL_TOKEN), `address was cut in the submitted receipt: ${line}`);
+  });
+
+  it("still strips and bounds a hostile symbol in the receipt", async () => {
+    const ESC = String.fromCharCode(27);
+    const CR = String.fromCharCode(13);
+    // Longer than 42 on purpose, so this covers both halves of what safeEcho does here.
+    const hostile = `USDC${ESC}[2K${CR}${"approved".repeat(5)}`;
+    assert.ok(hostile.length > 42, "the fixture has to exceed the bound to test it");
+
+    const p = await prepared(hostile);
+    const out = await runAction(SEND, RESOLVED, {
+      preparedToken: p,
+      sendToken: async () => ({ dryRun: true, to: DEAD, token: NO_SYMBOL_TOKEN, value: p.amountWei, fee: 0n }),
+    });
+
+    const line = labelLine(out);
+    assert.ok(!line.includes(ESC), "the escape byte must not survive into the receipt");
+    assert.ok(!line.includes(CR), "the carriage return must not survive into the receipt");
+    assert.ok(line.includes("..."), "a symbol past the bound has to come back cut");
+    assert.match(line, /^DRY RUN — would send 1\.0 USDC/, "the printable head of the symbol is kept");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // prepareTokenSend — pre-prompt validation and single token resolution
 // ---------------------------------------------------------------------------
 

@@ -861,6 +861,14 @@ export function lockSwapRoute(preview, routeIndex = 0) {
 /** Execute an action. Returns a printable string. Assumes wallet is initialized for chain ops. */
 export async function runAction(a, resolved, opts = {}) {
   const preparedToken = opts.preparedToken ?? null;
+  // The send itself is injectable for the same reason previewTokenSend takes getBalance,
+  // quoteSend and simulateSend: the receipt built from its result is what the operator reads
+  // after approving, and nothing could reach that formatting from a test while the wallet was
+  // called directly — sendToken refuses without an initialised account. The default is the
+  // real wallet call, and neither production caller passes this, so the executed path is
+  // unchanged. It does not widen what runAction is trusted with: preparedToken, already
+  // accepted here, carries the address and amount that get signed.
+  const sendToken = opts.sendToken ?? wallet.sendToken;
   // Read `resolved.address` once, here, and use that copy everywhere below: a getter or a
   // Proxy that answers the check with a valid address and the signature with another one is
   // otherwise free to do so. Padding is refused rather than trimmed, because isAddress()
@@ -1047,7 +1055,7 @@ export async function runAction(a, resolved, opts = {}) {
       if (!token?.address || !Number.isInteger(token.decimals) || typeof amountWei !== "bigint" || amountWei <= 0n) {
         return "Refused: send_token has invalid prepared token values";
       }
-      const res = await wallet.sendToken(to, token.address, amountWei);
+      const res = await sendToken(to, token.address, amountWei);
       // Same bound and the same reason as the confirmation block above: this falls back to
       // the address, and an address is 42 characters.
       const label = safeEcho(token.symbol || token.address, 42);
