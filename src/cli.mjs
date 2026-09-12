@@ -91,7 +91,10 @@ import {
   needsRecipient,
   buildSwapPreview,
   lockBestSwap,
+  getToolDefinitions,
+  dispatchToolCall,
 } from "./tools.mjs";
+import { runNativeToolLoop } from "./nativeToolLoop.mjs";
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
 // Gated on a real TTY + respects NO_COLOR, so piped/CI output stays clean text.
@@ -150,6 +153,7 @@ function statusBlock() {
   );
   row("rpc", c.gray(config.chain.rpcUrl));
   row("gas", `${dot} ${gas}`);
+  row("tools", config.useNativeTools ? c.green("native") + c.dim(" · structured tool-calling") : c.cyan("v0") + c.dim(" · JSON protocol"));
   if (mcpClients.length) {
     row("mcp", c.green(`${mcpClients.length} server${mcpClients.length === 1 ? "" : "s"}`) + c.dim(" · " + mcpClients.map((s) => s.name).join(", ")));
   }
@@ -241,12 +245,20 @@ async function invokeMcpToolCall(call) {
   }
 }
 
-/** Execute a parsed action, confirming writes. Returns nothing (prints results). */
+/**
+ * Execute a parsed action through the full safety boundary (recipient resolution,
+ * policy check, preview, mainnet ack, y/N confirmation) for writes; reads run
+ * directly. Returns the printable result/refusal string, or null when the action
+ * is `none` (model wants to just chat — its text has already streamed).
+ *
+ * The string is for the caller to put in a tool-result message, log, or test
+ * assertion. Side effects (printing, session-spend accounting) happen here.
+ */
 async function handleAction(action) {
   let resolved = null;
   let preparedToken = null;
   let swapPreview = null;
-  if (action.action === "none") return false;
+  if (action.action === "none") return null;
   if (isWrite(action.action)) {
     if (needsRecipient(action.action)) {
       // Resolve the recipient ONCE, before anything is shown, and hold it for the whole flow:
@@ -259,7 +271,7 @@ async function handleAction(action) {
       if (!prep.ok) {
         println(c.red(`  Refused: ${prep.reason}`) + "\n");
         if (SCRIPTED) hadFailure = true;
-        return true;
+        return `Refused: ${prep.reason}`;
       }
       resolved = prep.recipient;
       if (action.action === "send_token") preparedToken = prep;
@@ -272,27 +284,27 @@ async function handleAction(action) {
       } catch (err) {
         println(c.red(`  Refused: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;
-        return true;
+        return `Refused: ${err.message}`;
       }
       if (preview.error) {
         println(c.red(`  Refused: ${preview.error}`) + "\n");
         if (SCRIPTED) hadFailure = true;
-        return true;
+        return `Refused: ${preview.error}`;
       }
       println("\n  " + c.yellow(preview.block.replace(/\n/g, "\n  ")));
       if (!(await confirmMainnetOnce())) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
       if (!(await confirm("  confirm?"))) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
       swapPreview = await lockBestSwap(preview);
       if (swapPreview.error) {
         println(c.red(`  Refused: ${swapPreview.error}`) + "\n");
         if (SCRIPTED) hadFailure = true;
-        return true;
+        return `Refused: ${swapPreview.error}`;
       }
     } else if (action.action === "send_mon") {
       let preview;
@@ -301,7 +313,7 @@ async function handleAction(action) {
       } catch (err) {
         println(c.red(`  Refused: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;
-        return true;
+        return `Refused: ${err.message}`;
       }
       // Quoted against the bare address; shown with the alias beside it, so the operator
       // approves the same thing the book produced.
@@ -309,11 +321,11 @@ async function handleAction(action) {
       println("\n  " + c.yellow(block.replace(/\n/g, "\n  ")));
       if (!(await confirmMainnetOnce())) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
       if (!(await confirm("  confirm?"))) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
     } else if (action.action === "send_token") {
       let preview;
@@ -322,32 +334,32 @@ async function handleAction(action) {
       } catch (err) {
         println(c.red(`  Refused: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;
-        return true;
+        return `Refused: ${err.message}`;
       }
       if (!preview.ok) {
         println(c.red(`  Refused: ${preview.reason}`) + "\n");
         if (SCRIPTED) hadFailure = true;
-        return true;
+        return `Refused: ${preview.reason}`;
       }
       const block = renderTokenSendPreview({ ...preview, to: formatRecipient(resolved) });
       println("\n  " + c.yellow(block.replace(/\n/g, "\n  ")));
       if (!(await confirmMainnetOnce())) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
       if (!(await confirm("  confirm?"))) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
     } else {
       println("\n  " + c.yellow(describeAction(action, resolved)));
       if (!(await confirmMainnetOnce())) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
       if (!(await confirm("  confirm?"))) {
         println(c.dim("  cancelled.") + "\n");
-        return true;
+        return "cancelled";
       }
     }
   }
@@ -361,16 +373,16 @@ async function handleAction(action) {
       const safe = safeEcho(action.index, 40);
       println("\n  " + c.red(`Refused: "${safe}" is not a valid account index.`) + "\n");
       if (SCRIPTED) hadFailure = true;
-      return true;
+      return `Refused: "${safe}" is not a valid account index.`;
     }
     println("\n  " + c.yellow(describeAction(action)));
     if (!(await confirmMainnetOnce())) {
       println(c.dim("  cancelled.") + "\n");
-      return true;
+      return "cancelled";
     }
     if (!(await confirm("  confirm?"))) {
       println(c.dim("  cancelled.") + "\n");
-      return true;
+      return "cancelled";
     }
   }
   try {
@@ -390,11 +402,13 @@ async function handleAction(action) {
     // A refusal returned as a string is a failure too, same as the throw below;
     // in scripted mode it must set the exit code so a CI script can see it.
     if (SCRIPTED && refused) hadFailure = true;
+    return out;
   } catch (err) {
-    console.log(c.red(`  error: ${err.message}`) + "\n");
+    const message = `error: ${err.message}`;
+    console.log(c.red(`  ${message}`) + "\n");
     if (SCRIPTED) hadFailure = true;
+    return message;
   }
-  return true;
 }
 
 async function handleSlash(line) {
@@ -596,23 +610,47 @@ async function main() {
       return true;
     }
 
-    // v0 JSON protocol: the model's raw output (thinking + JSON) streams dimmed
-    // to the conversational surface; the executed result prints bright on stdout.
-    let raw = "";
+    // Native tool-calling writes must go through the SAME handleAction the v0
+    // path and slash commands use — that's the safety boundary. The loop body
+    // is in src/nativeToolLoop.mjs so it is reachable from tests; here we just
+    // pass in the handles it needs.
+    const hadFailureRef = { value: hadFailure };
     try {
-      raw = await brain.complete(history, (t) => printw(t));
-      printw(RST + "\n");
+      if (config.useNativeTools) {
+        await runNativeToolLoop({
+          history,
+          completeWithTools: brain.completeWithTools,
+          getToolDefinitions,
+          handleAction,
+          dispatchToolCall,
+          isWrite,
+          printw,
+          println,
+          DIM,
+          RST,
+          c,
+          SCRIPTED,
+          hadFailure: hadFailureRef,
+        });
+        if (hadFailureRef.value) hadFailure = true;
+      } else {
+        // v0 JSON protocol: the model's raw output (thinking + JSON) streams dimmed
+        // to the conversational surface; the executed result prints bright on stdout.
+        const raw = await brain.complete(history, (t) => printw(t));
+        printw(RST + "\n");
+        history.push({ role: "assistant", content: raw });
+
+        const action = parseAction(raw);
+        const result = await handleAction(action);
+        if (result == null) println(""); // model chose to just chat; its text already streamed
+      }
     } catch (err) {
       printw(RST);
       println(c.red(`  model error: ${err.message}`) + "\n");
       if (SCRIPTED) hadFailure = true;
       return true;
     }
-    history.push({ role: "assistant", content: raw });
 
-    const action = parseAction(raw);
-    const handled = await handleAction(action);
-    if (!handled) println(""); // model chose to just chat; its text already streamed
     return true;
   }
 
