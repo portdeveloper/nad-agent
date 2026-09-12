@@ -7,8 +7,16 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  test-os:
+    name: test (${{ matrix.os }})
+    # Both OSes report, so a Windows-only break is visible without
+    # hiding the Linux result behind it.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -25,3 +33,17 @@ jobs:
 
       - name: Run interpreter tests
         run: npm test
+
+  # Branch protection requires a check named `test`; the matrix jobs
+  # publish per-OS names, so this job carries the stable name and
+  # fails if either OS failed or was cancelled.
+  test:
+    needs: test-os
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both OS jobs to pass
+        if: needs.test-os.result != 'success'
+        run: |
+          echo "test-os result: ${{ needs.test-os.result }}"
+          exit 1

@@ -262,7 +262,15 @@ describe("persistence — setAccountIndex", () => {
       {
         cwd: process.cwd(),
         encoding: "utf8",
-        env: { ...process.env, NAD_STATE_PATH: TEST_STATE_PATH },
+        env: {
+          ...process.env,
+          NAD_STATE_PATH: TEST_STATE_PATH,
+          // console.log colours a number when colour is on, and the
+          // inherited env decides that. Assert on the value, not on
+          // whatever the runner exports.
+          FORCE_COLOR: "0",
+          NO_COLOR: "1",
+        },
       },
     ).trim();
     assert.equal(result, "7", "fresh process should read persisted index");
@@ -294,7 +302,15 @@ describe("persistence — setAccountIndex", () => {
       {
         cwd: process.cwd(),
         encoding: "utf8",
-        env: { ...process.env, NAD_STATE_PATH: TEST_STATE_PATH },
+        env: {
+          ...process.env,
+          NAD_STATE_PATH: TEST_STATE_PATH,
+          // console.log colours a number when colour is on, and the
+          // inherited env decides that. Assert on the value, not on
+          // whatever the runner exports.
+          FORCE_COLOR: "0",
+          NO_COLOR: "1",
+        },
       },
     ).trim();
     assert.equal(result, "0", "corrupted state.json should fall back to default (0)");
