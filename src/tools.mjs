@@ -1209,6 +1209,82 @@ export function getToolDefinitions() {
         required: ["token", "to", "amount"],
       },
     },
+    {
+      type: "function",
+      name: "get_nfts",
+      description: "Show the ERC-721 NFTs owned by the agent's wallet (or by a given 0x address).",
+      parameters: {
+        type: "object",
+        properties: {
+          address: {
+            type: "string",
+            description: "Optional 0x address to query instead of the agent's own wallet",
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      type: "function",
+      name: "transfer_nft",
+      description: "Send an ERC-721 NFT to a recipient (0x address or address-book alias).",
+      parameters: {
+        type: "object",
+        properties: {
+          to: {
+            type: "string",
+            description: "Recipient: 0x address or address-book alias",
+          },
+          contractAddress: {
+            type: "string",
+            description: "NFT contract address (0x...)",
+          },
+          tokenId: {
+            type: "string",
+            description: "Token ID of the NFT to transfer",
+          },
+        },
+        required: ["to", "contractAddress", "tokenId"],
+      },
+    },
+    {
+      type: "function",
+      name: "swap",
+      description: `Swap tokens on the testnet DEX. Tokens are symbols (${SYMBOL}, WMON, USDC, USDT, WETH) or 0x addresses.`,
+      parameters: {
+        type: "object",
+        properties: {
+          amountIn: {
+            type: "string",
+            description: "Amount of the input token (e.g. '10')",
+          },
+          tokenIn: {
+            type: "string",
+            description: "Input token symbol or contract address",
+          },
+          tokenOut: {
+            type: "string",
+            description: "Output token symbol or contract address",
+          },
+        },
+        required: ["amountIn", "tokenIn", "tokenOut"],
+      },
+    },
+    {
+      type: "function",
+      name: "account",
+      description: "List derived accounts (no args) or switch to account by BIP-44 index.",
+      parameters: {
+        type: "object",
+        properties: {
+          index: {
+            type: "number",
+            description: "BIP-44 account index to switch to (omit to list accounts)",
+          },
+        },
+        required: [],
+      },
+    },
   ];
 }
 
@@ -1224,6 +1300,10 @@ export async function dispatchToolCall(toolName, toolArgs, resolved = null) {
       return await runAction({ action: "get_balance" }, null);
     case "get_token_balance":
       return await runAction({ action: "get_token_balance", token: toolArgs.token }, null);
+    case "get_nfts":
+      return await runAction({ action: "get_nfts", address: toolArgs.address }, null);
+    case "account":
+      return await runAction({ action: "account" }, null);
     case "send_mon":
       return await runAction({ action: "send_mon", to: toolArgs.to, amountMon: toolArgs.amountMon }, resolved);
     case "send_token":

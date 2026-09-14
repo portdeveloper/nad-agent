@@ -32,7 +32,7 @@ await build({
   format: "esm",
   target: "node22",
   // QVAC is native + spawns its own Bare worker — never bundle it.
-  external: ["@qvac/sdk", "@qvac/*"],
+  external: ["@qvac/sdk", "@qvac/*", "@modelcontextprotocol/*"],
   // Bundle-only: give WDK the pure-JS sodium (safe in the Node main process),
   // without touching the native sodium-native that QVAC's worker needs.
   alias: { "sodium-native": "sodium-javascript" },

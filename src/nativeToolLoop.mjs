@@ -62,6 +62,7 @@ export async function runNativeToolLoop({
   // Loop until the model stops calling tools. The outer cap is the wall; the
   // inner cap is the per-conversation tool-call budget.
   let totalToolCalls = 0;
+  let lastTurnHadToolCalls = false;
 
   for (let turnCount = 0; turnCount < MAX_TURNS; turnCount++) {
     const result = await completeWithTools(history, getToolDefinitions(), (t) => printw(t));
@@ -81,6 +82,7 @@ export async function runNativeToolLoop({
     }
 
     if (result.toolCalls && result.toolCalls.length > 0) {
+      lastTurnHadToolCalls = true;
       totalToolCalls += result.toolCalls.length;
       if (totalToolCalls > MAX_TOOL_CALLS) {
         println(c.red(`  tool call limit (${MAX_TOOL_CALLS}) exceeded; stopping.`) + "\n");
@@ -97,12 +99,16 @@ export async function runNativeToolLoop({
         try {
           // ROUTE THROUGH THE SAFETY BOUNDARY.
           //
-          // Writes (send_mon, send_token, transfer_nft, swap, account-switch with
-          // an index) MUST go through handleAction so they share the recipient
-          // resolution, spend policy, preview, mainnet ack, and y/N confirmation
-          // the v0 path and the slash commands already use. Anything else is a
-          // read — dispatchToolCall is fine and stays snappy.
-          if (isWrite(toolCall.name)) {
+          // Writes (send_mon, send_token, transfer_nft, swap) and account-switch
+          // (account with an index) MUST go through handleAction so they share the
+          // recipient resolution, spend policy, preview, mainnet ack, and y/N
+          // confirmation the v0 path and the slash commands already use. Anything
+          // else is a read — dispatchToolCall is fine and stays snappy.
+          const isAccountSwitch = toolCall.name === "account" &&
+            toolCall.arguments.index !== undefined &&
+            toolCall.arguments.index !== null &&
+            toolCall.arguments.index !== "";
+          if (isWrite(toolCall.name) || isAccountSwitch) {
             execResult = await handleAction(action);
           } else {
             execResult = await dispatchToolCall(toolCall.name, toolCall.arguments);
@@ -133,12 +139,19 @@ export async function runNativeToolLoop({
       }
     } else if (result.text) {
       // Model just chatted, no tool calls. Text already streamed.
+      lastTurnHadToolCalls = false;
       println("");
       break;
     } else {
       // No text, no tool calls — model produced nothing.
+      lastTurnHadToolCalls = false;
       println("");
       break;
     }
+  }
+
+  if (lastTurnHadToolCalls) {
+    println(c.red(`  turn limit (${MAX_TURNS}) reached — the model is still calling tools; stopping.`) + "\n");
+    if (SCRIPTED) hadFailure.value = true;
   }
 }
