@@ -144,11 +144,18 @@ export async function completeWithMcp(
 /**
  * Run a completion with native tool-calling.
  * Returns { text, toolCalls, toolErrors } where toolCalls is an array of { id, name, arguments }
- * and toolErrors is an array of { toolCallId, error, details }.
+ * and toolErrors is an array of { code, message, raw? } — the `error` payload of the
+ * SDK's `toolError` event (locked @qvac/sdk 0.14.1 emits `toolError` on `run.events`;
+ * `toolCallError` belongs to the separate tool-call stream and is accepted here only
+ * as a fallback so a dialect change can't silently drop failures).
+ *
+ * `runCompletion` is a test seam (same pattern as completeWithMcp): it defaults to
+ * QVAC's own `completion()`, but a caller can inject a fake `{ events }` producer to
+ * drive the exact event-parsing code below without a live model.
  */
-export async function completeWithTools(history, tools, onToken) {
-  const { completion } = await qvac();
-  const run = completion({ modelId, history, tools, stream: true }, { timeout: 300_000 });
+export async function completeWithTools(history, tools, onToken, { runCompletion } = {}) {
+  const doCompletion = runCompletion ?? (await qvac()).completion;
+  const run = doCompletion({ modelId, history, tools, stream: true }, { timeout: 300_000 });
   let text = "";
   const toolCalls = [];
   const toolErrors = [];
@@ -160,8 +167,12 @@ export async function completeWithTools(history, tools, onToken) {
         if (onToken) onToken(event.text);
       } else if (event.type === "toolCall") {
         toolCalls.push(event.call);
+      } else if (event.type === "toolError") {
+        toolErrors.push(event.error);
       } else if (event.type === "toolCallError") {
-        toolErrors.push(event);
+        // Fallback: not emitted on run.events by SDK 0.14.1, but preserve the
+        // message rather than dropping it if a future SDK/dialect does.
+        toolErrors.push(event.error ?? event);
       }
     }
   } catch (err) {

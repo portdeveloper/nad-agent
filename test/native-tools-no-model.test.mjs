@@ -12,6 +12,8 @@ import {
   dispatchToolCall,
   parseAction,
   systemPrompt,
+  nativeSystemPrompt,
+  selectSystemPrompt,
   ACTIONS,
 } from "../src/tools.mjs";
 
@@ -41,16 +43,20 @@ function mockQvacCompletion(toolCallName, toolCallArgs, textResponse = "") {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Native tool-calling — schema validation", () => {
-  test("getToolDefinitions returns 5 tools matching v0 ACTIONS", () => {
+  test("getToolDefinitions returns 9 tools matching v0 ACTIONS", () => {
     const tools = getToolDefinitions();
-    assert.equal(tools.length, 5);
+    assert.equal(tools.length, 9);
 
     const toolNames = new Set(tools.map((t) => t.name));
     assert.ok(toolNames.has("get_address"));
     assert.ok(toolNames.has("get_balance"));
     assert.ok(toolNames.has("get_token_balance"));
+    assert.ok(toolNames.has("get_nfts"));
     assert.ok(toolNames.has("send_mon"));
     assert.ok(toolNames.has("send_token"));
+    assert.ok(toolNames.has("transfer_nft"));
+    assert.ok(toolNames.has("swap"));
+    assert.ok(toolNames.has("account"));
   });
 
   test("each tool has required OpenAI-compatible fields", () => {
@@ -123,6 +129,24 @@ describe("Native tool-calling — dispatch routing", () => {
     }
   });
 
+  test("dispatchToolCall routes get_nfts", async () => {
+    try {
+      const result = await dispatchToolCall("get_nfts", {});
+      assert.ok(typeof result === "string");
+    } catch (err) {
+      assert.ok(err.message.includes("wallet") || err.message.includes("not initialized"));
+    }
+  });
+
+  test("dispatchToolCall routes account (list-only, no index)", async () => {
+    try {
+      const result = await dispatchToolCall("account", {});
+      assert.ok(typeof result === "string");
+    } catch (err) {
+      assert.ok(err.message.includes("wallet") || err.message.includes("not initialized"));
+    }
+  });
+
   test("dispatchToolCall throws on unknown tool", async () => {
     try {
       await dispatchToolCall("unknown_tool", {});
@@ -141,6 +165,33 @@ describe("Native tool-calling — dispatch routing", () => {
       // Also acceptable: throw on bad address
       assert.ok(err.message);
     }
+  });
+
+  test("dispatchToolCall rejects transfer_nft without resolved recipient", async () => {
+    const result = await dispatchToolCall("transfer_nft", {
+      to: "0x000000000000000000000000000000000000dEaD",
+      contractAddress: "0x000000000000000000000000000000000000dEaD",
+      tokenId: "1",
+    });
+    assert.match(result, /Refused/);
+  });
+
+  test("dispatchToolCall rejects send_token without resolved recipient", async () => {
+    const result = await dispatchToolCall("send_token", {
+      token: "USDC",
+      to: "0x000000000000000000000000000000000000dEaD",
+      amount: "1",
+    });
+    assert.match(result, /Refused/);
+  });
+
+  test("dispatchToolCall refuses swap with an unknown token before any network", async () => {
+    const result = await dispatchToolCall("swap", {
+      amountIn: "1",
+      tokenIn: "NOPE_NOT_A_TOKEN",
+      tokenOut: "USDC",
+    });
+    assert.match(result, /Refused/);
   });
 });
 
@@ -260,6 +311,23 @@ describe("Backward compatibility — v0 JSON protocol", () => {
       assert.ok(prompt.includes(action), `systemPrompt missing ${action}`);
     }
   });
+
+  test("nativeSystemPrompt does not instruct JSON — it instructs tool calls", () => {
+    const prompt = nativeSystemPrompt();
+    assert.ok(!prompt.includes('{"action"'), "native prompt must not mention JSON actions");
+    assert.ok(!prompt.includes("ONE line of JSON"), "native prompt must not ask for JSON lines");
+    for (const tool of [
+      "get_address", "get_balance", "get_token_balance", "get_nfts",
+      "send_mon", "send_token", "transfer_nft", "swap", "account",
+    ]) {
+      assert.ok(prompt.includes(tool), `native prompt missing ${tool}`);
+    }
+  });
+
+  test("selectSystemPrompt picks the prompt for the enabled protocol", () => {
+    assert.equal(selectSystemPrompt(true), nativeSystemPrompt());
+    assert.equal(selectSystemPrompt(false), systemPrompt());
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -366,7 +434,7 @@ describe("Protocol comparison — native vs v0", () => {
 });
 
 console.log("\n✓ All native tool-calling tests passed");
-console.log("✓ Schema validation: 5 tools with correct OpenAI format");
+console.log("✓ Schema validation: 9 tools with correct OpenAI format");
 console.log("✓ Dispatch routing: all tools route correctly");
 console.log("✓ Mock QVAC flow: realistic completion simulation");
 console.log("✓ Config toggle: USE_NATIVE_TOOLS switch works");

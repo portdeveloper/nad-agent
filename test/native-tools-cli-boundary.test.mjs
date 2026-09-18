@@ -26,7 +26,20 @@ import { describe, it, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { runNativeToolLoop } from "../src/nativeToolLoop.mjs";
+import { completeWithTools } from "../src/agent.mjs";
 import { isWrite, resolveSend, prepareTokenSend } from "../src/tools.mjs";
+
+/** Build a fake QVAC `completion()` whose run emits exactly `events` on
+ *  `run.events` — the SDK 0.14.1 surface completeWithTools parses. */
+function makeFakeRunCompletion(events) {
+  return function fakeRunCompletion(_params, _opts) {
+    return {
+      events: (async function* () {
+        for (const e of events) yield e;
+      })(),
+    };
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test harness: stubbed boundary seams + captured stream.
@@ -353,15 +366,18 @@ describe("Native tool loop — read fast path", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Native tool loop — hadFailure propagation (processLine/CLI boundary)", () => {
-  test("toolCallError inside loop sets hadFailure.value (toolErrors path)", async () => {
-    // The loop exits early when toolErrors is non-empty and sets hadFailure.value.
+  test("SDK toolError inside loop sets hadFailure.value and preserves the message", async () => {
+    // Locked @qvac/sdk 0.14.1 emits `toolError` on run.events with the failure in
+    // `error: { code, message }` — `toolCallError` belongs to the separate
+    // tool-call stream. The loop exits early, prints the SDK message verbatim,
+    // and sets hadFailure.value for the caller (cli.mjs) to exit 1 in scripted mode.
     const handleAction = makeHandleStub();
     const dispatch = makeSendStub();
     const completeWithTools = makeFakeComplete([
       {
         text: "",
         toolCalls: [],
-        toolErrors: [{ error: "malformed tool call" }],
+        toolErrors: [{ code: "VALIDATION_ERROR", message: "send_mon.amountMon: expected string" }],
       },
     ]);
 
@@ -381,7 +397,13 @@ describe("Native tool loop — hadFailure propagation (processLine/CLI boundary)
 
     // The loop must have set hadFailure.value = true for the caller (cli.mjs)
     // to propagate it into the outer hadFailure boolean and exit with code 1.
-    assert.equal(hadFailure.value, true, "toolCallError must set hadFailure.value");
+    assert.equal(hadFailure.value, true, "toolError must set hadFailure.value");
+    const printed = stream.printed.join("");
+    assert.ok(
+      printed.includes("send_mon.amountMon: expected string"),
+      "the SDK message must reach the operator, not a generic fallback"
+    );
+    assert.ok(printed.includes("VALIDATION_ERROR"), "the SDK code must be preserved");
   });
 
   test("tool-call cap exceeded sets hadFailure.value", async () => {
@@ -465,8 +487,207 @@ describe("Native tool loop — hadFailure propagation (processLine/CLI boundary)
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 3b. Exact-function regression: an SDK-schema-valid `toolError` through the
+//     REAL completeWithTools event parser and the REAL production loop.
+//     (The pre-fix parser listened for `toolCallError` here, returned
+//     toolErrors: [] and left hadFailure false.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Native tool loop — SDK toolError via the real completion function", () => {
+  test("toolError event → toolErrors → hadFailure + preserved message", async () => {
+    const dispatch = makeSendStub();
+    const handleAction = makeHandleStub();
+    const sdkMessage = "send_mon.amountMon: expected string, got number";
+    const runCompletion = makeFakeRunCompletion([
+      { type: "contentDelta", seq: 0, text: "fixing that…" },
+      {
+        type: "toolError",
+        seq: 1,
+        error: { code: "VALIDATION_ERROR", message: sdkMessage },
+      },
+    ]);
+    // The EXACT production composition: the loop calls completeWithTools, which
+    // parses run.events. Only the model itself is faked (no GPU needed).
+    const completeViaRealParser = (history, tools, onToken) =>
+      completeWithTools(history, tools, onToken, { runCompletion });
+
+    const hadFailure = { value: false };
+    await runNativeToolLoop({
+      history: [{ role: "system", content: "test" }],
+      completeWithTools: completeViaRealParser,
+      getToolDefinitions: () => [],
+      handleAction,
+      dispatchToolCall: dispatch,
+      isWrite,
+      printw: stream.printw,
+      println: stream.println,
+      DIM, RST, c: noColor, SCRIPTED: true,
+      hadFailure,
+    });
+
+    assert.equal(hadFailure.value, true, "SDK toolError must fail a scripted run");
+    const printed = stream.printed.join("");
+    assert.ok(printed.includes(sdkMessage), "SDK message must be preserved to the operator");
+    assert.ok(printed.includes("VALIDATION_ERROR"), "SDK code must be preserved");
+  });
+
+  test("toolCall events still parse to toolCalls (no regression)", async () => {
+    const runCompletion = makeFakeRunCompletion([
+      { type: "contentDelta", seq: 0, text: "checking…" },
+      {
+        type: "toolCall",
+        seq: 1,
+        call: { id: "call_1", name: "get_balance", arguments: {} },
+      },
+    ]);
+    const result = await completeWithTools([], [], null, { runCompletion });
+    assert.equal(result.text, "checking…");
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(result.toolCalls[0].name, "get_balance");
+    assert.deepEqual(result.toolErrors, []);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Turn exhaustion: outer loop limit must report failure, not silently succeed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Native tool loop — turn exhaustion (PR #77 blocker 2)", () => {
+  test("outer turn limit exhaustion sets hadFailure.value", async () => {
+    const dispatch = makeSendStub();
+    const handleAction = makeHandleStub();
+    // Feed MAX_TURNS tool-call responses with no text-only response to break out.
+    // With MAX_TURNS=3, the loop runs 3 iterations, each returning a tool call,
+    // then exits the for-loop with lastTurnHadToolCalls=true.
+    const responses = Array.from({ length: 3 }, (_, i) => ({
+      text: "",
+      toolCalls: [{ id: `turn_${i}`, name: "get_balance", arguments: {} }],
+    }));
+    const completeWithTools = makeFakeComplete(responses);
+
+    const hadFailure = { value: false };
+    await runNativeToolLoop({
+      history: [{ role: "system", content: "test" }],
+      completeWithTools,
+      getToolDefinitions: () => [],
+      handleAction,
+      dispatchToolCall: dispatch,
+      isWrite,
+      printw: stream.printw,
+      println: stream.println,
+      DIM, RST, c: noColor, SCRIPTED: true,
+      hadFailure,
+      MAX_TURNS: 3,
+      MAX_TOOL_CALLS: 100,
+    });
+
+    assert.equal(hadFailure.value, true, "turn exhaustion must set hadFailure.value");
+    assert.equal(dispatch.calls.length, 3, "all 3 turns should have dispatched");
+    const printed = stream.printed.join("");
+    assert.ok(printed.includes("turn limit"), "should print turn-limit message");
+  });
+
+  test("turn limit NOT triggered when model stops calling tools before limit", async () => {
+    const dispatch = makeSendStub();
+    const handleAction = makeHandleStub();
+    // 2 tool calls then a text-only response — should exit cleanly at turn 3.
+    const completeWithTools = makeFakeComplete([
+      { text: "", toolCalls: [{ id: "t1", name: "get_balance", arguments: {} }] },
+      { text: "", toolCalls: [{ id: "t2", name: "get_balance", arguments: {} }] },
+      { text: "Here is your balance.", toolCalls: [] },
+    ]);
+
+    const hadFailure = { value: false };
+    await runNativeToolLoop({
+      history: [{ role: "system", content: "test" }],
+      completeWithTools,
+      getToolDefinitions: () => [],
+      handleAction,
+      dispatchToolCall: dispatch,
+      isWrite,
+      printw: stream.printw,
+      println: stream.println,
+      DIM, RST, c: noColor, SCRIPTED: true,
+      hadFailure,
+      MAX_TURNS: 3,
+      MAX_TOOL_CALLS: 100,
+    });
+
+    assert.equal(hadFailure.value, false, "early text stop must not trigger turn exhaustion");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Account-switch routing: account with index goes through handleAction.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Native tool loop — account-switch routing", () => {
+  test("account with index routes through handleAction (confirmation boundary)", async () => {
+    const handleAction = makeHandleStub({ answer: "n" });
+    const dispatch = makeSendStub();
+
+    await runOnce({
+      responses: [
+        {
+          text: "",
+          toolCalls: [{ id: "acct_1", name: "account", arguments: { index: 1 } }],
+        },
+      ],
+      handleAction,
+      dispatchToolCall: dispatch,
+    });
+
+    assert.equal(handleAction.calls.length, 1, "account-with-index must go through handleAction");
+    assert.equal(handleAction.calls[0].action.action, "account");
+    assert.equal(handleAction.calls[0].action.index, 1);
+    assert.equal(dispatch.calls.length, 0, "account-with-index must not be dispatched directly");
+  });
+
+  test("account without index routes through dispatchToolCall (list-only, no confirmation)", async () => {
+    const handleAction = makeHandleStub();
+    const dispatch = makeSendStub();
+
+    await runOnce({
+      responses: [
+        {
+          text: "",
+          toolCalls: [{ id: "acct_2", name: "account", arguments: {} }],
+        },
+      ],
+      handleAction,
+      dispatchToolCall: dispatch,
+    });
+
+    assert.equal(dispatch.calls.length, 1, "account-list must go through dispatchToolCall");
+    assert.equal(dispatch.calls[0].name, "account");
+    assert.equal(handleAction.calls.length, 0, "account-list must not go through handleAction");
+  });
+
+  test("account with index=0 still routes through handleAction", async () => {
+    const handleAction = makeHandleStub({ answer: "n" });
+    const dispatch = makeSendStub();
+
+    await runOnce({
+      responses: [
+        {
+          text: "",
+          toolCalls: [{ id: "acct_3", name: "account", arguments: { index: 0 } }],
+        },
+      ],
+      handleAction,
+      dispatchToolCall: dispatch,
+    });
+
+    assert.equal(handleAction.calls.length, 1, "account index=0 must go through handleAction");
+    assert.equal(dispatch.calls.length, 0);
+  });
+});
+
 console.log("\n✓ Native tool CLI-boundary regression: writes route through handleAction");
 console.log("✓ Read-only tool calls stay on dispatchToolCall (fast path)");
 console.log("✓ Policy/resolveSend refusal runs through the real boundary code");
 console.log("✓ PR #77 security blocker covered by a real boundary test, not a re-implemented loop");
 console.log("✓ hadFailure propagation: toolErrors / cap / dispatch-exception all set hadFailure.value");
+console.log("✓ Turn exhaustion: outer loop limit sets hadFailure.value");
+console.log("✓ Account-switch routing: index → handleAction, no index → dispatchToolCall");

@@ -11,6 +11,26 @@
  */
 
 /**
+ * Format one tool error for the operator, preserving the SDK message.
+ *
+ * completeWithTools returns the SDK `toolError` payload `{ code, message, raw? }`
+ * (see agent.mjs). Older test doubles used the pre-fix whole-event shape
+ * `{ error: <string|{message}> }`. Both are accepted here so a shape change can
+ * never silently print "[object Object]" or "malformed tool call" while dropping
+ * the real message the model needs to react to.
+ */
+export function formatToolError(toolErr) {
+  if (typeof toolErr === "string") return toolErr;
+  const nested = toolErr?.error;
+  const nestedMsg =
+    typeof nested === "string" ? nested : nested?.message ?? nested?.code ?? null;
+  const message = toolErr?.message ?? nestedMsg ?? null;
+  const code = toolErr?.code ?? (typeof nested === "object" ? nested?.code : null) ?? null;
+  const text = message ?? "malformed tool call";
+  return code ? `[${code}]: ${text}` : text;
+}
+
+/**
  * Run one full tool-turn loop against `history` (mutated in place: assistant and
  * tool messages are appended). The loop:
  *   1. Calls `completeWithTools(history, getToolDefinitions(), onToken)`.
@@ -19,7 +39,7 @@
  *      through `dispatchToolCall`. The chosen return value is fed back as a
  *      tool-result message so the model can react.
  *   3. Repeats until the model emits no more tool calls, hits the per-turn
- *      cap, hits the global tool-call cap, or returns a toolCallError.
+ *      cap, hits the global tool-call cap, or returns a toolError.
  *
  * `handleAction` MUST be the same one cli.mjs uses for slash commands and the
  * v0 path — that is the whole point. `dispatchToolCall` is left in for the
@@ -30,7 +50,7 @@
  * @param ctx.completeWithTools
  * @param ctx.getToolDefinitions
  * @param ctx.handleAction  function taking an action object, returning a printable result string or null.
- * @param ctx.dispatchToolCall  read-only fast path; used for get_address / get_balance / get_token_balance.
+ * @param ctx.dispatchToolCall  read-only fast path for non-write tools.
  * @param ctx.isWrite  toolName -> boolean.
  * @param ctx.printw  write raw text to the active stream (no newline).
  * @param ctx.println  print a line to the active stream.
@@ -72,10 +92,13 @@ export async function runNativeToolLoop({
     const assistantContent = result.text || `[tool calls: ${result.toolCalls.map((c) => c.name).join(", ")}]`;
     history.push({ role: "assistant", content: assistantContent });
 
-    // Surface tool call errors to the user.
+    // Surface tool call errors to the user. The message is preserved verbatim
+    // (formatToolError handles both the SDK {code,message} payload and the
+    // pre-fix whole-event shape) so the scripted failure path carries what the
+    // SDK reported.
     if (result.toolErrors && result.toolErrors.length > 0) {
       for (const toolErr of result.toolErrors) {
-        println(c.red(`  tool error: ${toolErr.error || "malformed tool call"}`));
+        println(c.red(`  tool error: ${formatToolError(toolErr)}`));
         if (SCRIPTED) hadFailure.value = true;
       }
       break; // Do not continue the loop if there were errors.

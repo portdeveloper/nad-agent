@@ -75,7 +75,7 @@ import { addressBookWarnings, formatRecipient, safeEcho } from "./addressBook.mj
 import { loadMcpConfig, connectMcpServers, disconnectMcpServers, summarizeMcpToolResult } from "./mcp.mjs";
 import {
   ACTIONS,
-  systemPrompt,
+  selectSystemPrompt,
   parseAction,
   runAction,
   isRefusal,
@@ -95,6 +95,26 @@ import {
   dispatchToolCall,
 } from "./tools.mjs";
 import { runNativeToolLoop } from "./nativeToolLoop.mjs";
+
+/**
+ * Build the REPL's initial history with the prompt matching the enabled
+ * protocol: native tool-calling gets nativeSystemPrompt() (function tools, no
+ * JSON instruction); v0 gets systemPrompt() (one JSON action line). Exported so
+ * tests drive the real CLI selection instead of re-implementing it.
+ */
+export function buildInitialHistory() {
+  return [{ role: "system", content: selectSystemPrompt(config.useNativeTools) }];
+}
+
+/**
+ * Fold a native-turn failure back into the outer scripted flag — the exact step
+ * processLine performs before the scripted `process.exit(hadFailure ? 1 : 0)`.
+ * Exported so the CLI exit-path regression drives the real mapping.
+ */
+export function propagateHadFailure(hadFailureRef, outerHadFailure) {
+  if (hadFailureRef?.value) return true;
+  return outerHadFailure;
+}
 
 // ── color (no deps) ─────────────────────────────────────────────────────────
 // Gated on a real TTY + respects NO_COLOR, so piped/CI output stays clean text.
@@ -632,7 +652,7 @@ async function main() {
           SCRIPTED,
           hadFailure: hadFailureRef,
         });
-        if (hadFailureRef.value) hadFailure = true;
+        hadFailure = propagateHadFailure(hadFailureRef, hadFailure);
       } else {
         // v0 JSON protocol: the model's raw output (thinking + JSON) streams dimmed
         // to the conversational surface; the executed result prints bright on stdout.
@@ -654,7 +674,7 @@ async function main() {
     return true;
   }
 
-  const history = [{ role: "system", content: systemPrompt() }];
+  const history = buildInitialHistory();
 
   if (SCRIPTED) {
     // Scripted mode: no readline at all. Execute the buffered lines in order;
@@ -700,7 +720,16 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Test seam: importing this module with NAD_CLI_NO_RUN=1 loads its exports
+// (handleAction, buildInitialHistory, propagateHadFailure) without starting the
+// REPL — which would otherwise drain stdin, load the model, and call
+// process.exit. Production entry points (npm start, node dist/cli.mjs) never set
+// it, so runtime behavior is unchanged.
+if (!process.env.NAD_CLI_NO_RUN) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+export { handleAction };

@@ -110,6 +110,49 @@ export function systemPrompt() {
   );
 }
 
+/**
+ * Build the system prompt for native tool-calling (capable models).
+ *
+ * Unlike systemPrompt(), this NEVER instructs the model to emit one JSON action
+ * line: the native loop (runNativeToolLoop) treats free text as a chat reply and
+ * only executes structured tool calls from `completion({ tools })`. Telling a
+ * native-mode model to output JSON instead would produce text the loop displays
+ * but never executes — a silent no-op for every write.
+ */
+export function nativeSystemPrompt() {
+  const list = Object.entries(ACTIONS)
+    .filter(([name]) => name !== "none")
+    .map(([name, { args, optionalArgs = [], desc }]) => {
+      const shown = [...args, ...optionalArgs.map((x) => `${x}?`)];
+      return `- ${name}(${shown.join(", ")}): ${desc}`;
+    })
+    .join("\n");
+  const dex = config.chain.dex;
+  const swapLine = dex
+    ? `Swaps run on ${dex.name}. Known tokens: ${[config.chain.symbol, ...dex.tokens.map((t) => t.symbol)].join(", ")}. ` +
+      `Call the swap tool with amountIn/tokenIn/tokenOut.\n`
+    : "";
+  return (
+    `You are nad-agent, a wallet assistant on ${config.chain.name}. You control a ` +
+    `self-custodial smart account with structured function tools. When the user wants ` +
+    `an on-chain action, call the matching tool with its arguments — do NOT output ` +
+    `JSON action lines, prose descriptions of calls, or code blocks.\n` +
+    `Available tools:\n${list}\n` +
+    swapLine +
+    `If it isn't an on-chain request, just reply in words without calling a tool. ` +
+    `Never invent addresses.`
+  );
+}
+
+/**
+ * Select the system prompt matching the enabled protocol. Native tool-calling
+ * needs nativeSystemPrompt(); the hand-rolled v0 JSON protocol needs
+ * systemPrompt(). Centralized here so cli.mjs and tests agree on the mapping.
+ */
+export function selectSystemPrompt(useNativeTools) {
+  return useNativeTools ? nativeSystemPrompt() : systemPrompt();
+}
+
 function normalizeParsedAction(obj) {
   if (!obj?.action || !ACTIONS[obj.action]) return null;
   const token = obj.token ?? obj.symbol ?? obj.tokenAddress;
@@ -1291,25 +1334,49 @@ export function getToolDefinitions() {
 /**
  * Dispatch a tool call by name to the appropriate handler.
  * Returns the result string (same as runAction output) or throws an error.
+ *
+ * NOTE: in the production native loop this is the READ-ONLY fast path — writes
+ * (isWrite() true, plus account-with-index) are routed through handleAction in
+ * cli.mjs so they keep resolveSend/policy/preview/confirm. The write cases below
+ * exist so every advertised tool has a defined dispatch (tests pin all 9); called
+ * directly they still enforce runAction's own guards (e.g. send_mon without a
+ * pre-resolved recipient returns a Refused string instead of signing).
  */
 export async function dispatchToolCall(toolName, toolArgs, resolved = null) {
+  const args = toolArgs ?? {};
   switch (toolName) {
     case "get_address":
       return await runAction({ action: "get_address" }, null);
     case "get_balance":
       return await runAction({ action: "get_balance" }, null);
     case "get_token_balance":
-      return await runAction({ action: "get_token_balance", token: toolArgs.token }, null);
+      return await runAction({ action: "get_token_balance", token: args.token }, null);
     case "get_nfts":
-      return await runAction({ action: "get_nfts", address: toolArgs.address }, null);
+      return await runAction({ action: "get_nfts", address: args.address }, null);
     case "account":
       return await runAction({ action: "account" }, null);
     case "send_mon":
-      return await runAction({ action: "send_mon", to: toolArgs.to, amountMon: toolArgs.amountMon }, resolved);
+      return await runAction({ action: "send_mon", to: args.to, amountMon: args.amountMon }, resolved);
     case "send_token":
       return await runAction(
-        { action: "send_token", token: toolArgs.token, to: toolArgs.to, amount: toolArgs.amount },
+        { action: "send_token", token: args.token, to: args.to, amount: args.amount },
         resolved
+      );
+    case "transfer_nft":
+      return await runAction(
+        {
+          action: "transfer_nft",
+          to: args.to,
+          contractAddress: args.contractAddress ?? args.contract,
+          tokenId: args.tokenId,
+          ...(args.fromAddress !== undefined ? { fromAddress: args.fromAddress } : {}),
+        },
+        resolved
+      );
+    case "swap":
+      return await runAction(
+        { action: "swap", amountIn: args.amountIn, tokenIn: args.tokenIn, tokenOut: args.tokenOut },
+        null
       );
     default:
       throw new Error(`Unknown tool: ${toolName}`);
