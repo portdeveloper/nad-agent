@@ -9,11 +9,12 @@
  *   node scripts/fetch-model.mjs <gguf-url> [outfile.gguf]
  */
 
-import { createWriteStream, existsSync, mkdirSync, statSync, readFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
 // GGUFDownloader
@@ -195,7 +196,14 @@ export function computeMD5(filePath) {
 // CLI entry point
 // ---------------------------------------------------------------------------
 
-const isEntryPoint = new URL(import.meta.url).pathname === process.argv[1];
+// Compare resolved filesystem paths, not a URL pathname against argv. A URL
+// pathname is percent-encoded and POSIX-shaped, so it never equals argv[1] on
+// Windows, on a path holding a space, or when the script is run via a symlink —
+// and this file's only side effect lives behind this guard, so a mismatch makes
+// the CLI exit 0 having done nothing. realpathSync resolves the symlink case;
+// argv[1] is absent under `node -e` and the REPL.
+const isEntryPoint =
+  Boolean(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isEntryPoint) {
   const url = process.argv[2];

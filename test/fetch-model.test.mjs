@@ -7,9 +7,11 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   GGUFDownloader,
@@ -424,5 +426,71 @@ describe("Error types", () => {
     assert.ok(new ResumeCheckFailed("x") instanceof Error);
     assert.ok(new FetchFailed("x") instanceof Error);
     assert.ok(new IntegrityError("x") instanceof Error);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CLI entry point
+// ---------------------------------------------------------------------------
+
+const SCRIPT = fileURLToPath(new URL("../scripts/fetch-model.mjs", import.meta.url));
+
+/** Run the script and return {status, stderr}; a clean exit reports status 0. */
+function runScript(path, args = []) {
+  try {
+    execFileSync(process.execPath, [path, ...args], { encoding: "utf8", stdio: "pipe" });
+    return { status: 0, stderr: "" };
+  } catch (e) {
+    return { status: e.status, stderr: e.stderr ?? "" };
+  }
+}
+
+describe("CLI entry point", () => {
+  // The guard used to compare a URL pathname against argv[1]. Those agree only
+  // on a plain POSIX path: a space is percent-encoded on one side and not the
+  // other, a symlink is resolved on one side and not the other, and on Windows
+  // the pathname keeps a leading slash and forward slashes. Since every side
+  // effect in the script sits behind the guard, a mismatch made the CLI exit 0
+  // having printed nothing and downloaded nothing. Each case below runs the
+  // script for real, because that mismatch is invisible to an in-process import.
+
+  it("rejects a missing URL with the usage banner instead of exiting 0", () => {
+    const { status, stderr } = runScript(SCRIPT);
+    assert.equal(status, 1, "the CLI must run and reject a missing URL, not exit 0 silently");
+    assert.match(stderr, /usage: node scripts\/fetch-model\.mjs/);
+  });
+
+  it("still runs from a path containing a space", () => {
+    // The script imports only node: builtins, so a copy runs standalone. This
+    // is the Windows failure reproduced on POSIX: argv[1] holds a literal
+    // space where the URL pathname holds %20.
+    const dir = join(tmpdir(), `nad agent cli ${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    const copy = join(dir, "fetch-model.mjs");
+    try {
+      copyFileSync(SCRIPT, copy);
+      const { status, stderr } = runScript(copy);
+      assert.equal(status, 1, "a space in the path must not turn the CLI into a no-op");
+      assert.match(stderr, /usage: node scripts\/fetch-model\.mjs/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still runs when invoked through a symlink", () => {
+    const dir = join(tmpdir(), `nad-agent-cli-link-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    const link = join(dir, "fetch-model.mjs");
+    try {
+      symlinkSync(SCRIPT, link);
+      const { status, stderr } = runScript(link);
+      assert.equal(status, 1, "a symlinked entry point must not turn the CLI into a no-op");
+      assert.match(stderr, /usage: node scripts\/fetch-model\.mjs/);
+    } catch (e) {
+      if (e.code === "EPERM") return; // Windows without developer mode
+      throw e;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
