@@ -27,7 +27,7 @@ import assert from "node:assert/strict";
 
 import { runNativeToolLoop } from "../src/nativeToolLoop.mjs";
 import { completeWithTools } from "../src/agent.mjs";
-import { isWrite, resolveSend, prepareTokenSend } from "../src/tools.mjs";
+import { isWrite, resolveSend, prepareTokenSend, dispatchToolCall as realDispatchToolCall } from "../src/tools.mjs";
 
 /** Build a fake QVAC `completion()` whose run emits exactly `events` on
  *  `run.events` — the SDK 0.14.1 surface completeWithTools parses. */
@@ -546,6 +546,44 @@ describe("Native tool loop — SDK toolError via the real completion function", 
     assert.equal(result.toolCalls.length, 1);
     assert.equal(result.toolCalls[0].name, "get_balance");
     assert.deepEqual(result.toolErrors, []);
+  });
+
+  test("Refused read result via the REAL dispatch path fails scripted — and sticks", async () => {
+    // Maintainer repro: get_nfts with a bad address printed
+    // `Refused: "not-an-address" is not a valid address.` yet finished with
+    // hadFailure false (exit 0). The v0 path marks isRefusal(out) a failure;
+    // the native loop must do the same — even when a later turn chats cleanly.
+    const completeWithTools = makeFakeComplete([
+      {
+        text: "",
+        toolCalls: [{ id: "r1", name: "get_nfts", arguments: { address: "not-an-address" } }],
+      },
+      { text: "Understood — no NFTs then.", toolCalls: [] },
+    ]);
+
+    const hadFailure = { value: false };
+    await runNativeToolLoop({
+      history: [{ role: "system", content: "test" }],
+      completeWithTools,
+      getToolDefinitions: () => [],
+      handleAction: makeHandleStub(),
+      dispatchToolCall: realDispatchToolCall, // REAL dispatch — the reported setup
+      isWrite,
+      printw: stream.printw,
+      println: stream.println,
+      DIM, RST, c: noColor, SCRIPTED: true,
+      hadFailure,
+    });
+
+    const printed = stream.printed.join("");
+    assert.ok(
+      printed.includes('Refused: "not-an-address" is not a valid address.'),
+      "the refusal must reach the operator"
+    );
+    assert.equal(
+      hadFailure.value, true,
+      "a Refused read must fail the scripted run even though a later turn succeeded"
+    );
   });
 });
 

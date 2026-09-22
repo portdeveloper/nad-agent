@@ -10,6 +10,8 @@
  * interactive REPL and a scripted test.
  */
 
+import { isRefusal } from "./tools.mjs";
+
 /**
  * Format one tool error for the operator, preserving the SDK message.
  *
@@ -139,6 +141,16 @@ export async function runNativeToolLoop({
         } catch (err) {
           execResult = `Error: ${err.message || String(err)}`;
           if (SCRIPTED) hadFailure.value = true;
+        }
+
+        // A returned refusal is a failure too — same rule as the v0 path, which
+        // checks isRefusal(out) and marks scripted runs failed. Applies to both
+        // sides of the seam: reads refused by dispatchToolCall (e.g. get_nfts
+        // with a bad address) and writes refused by handleAction. The flag is
+        // sticky: a later clean turn must not clear it (no reset anywhere in
+        // this loop), so a refusal followed by chat still exits non-zero.
+        if (execResult != null && isRefusal(execResult) && SCRIPTED) {
+          hadFailure.value = true;
         }
 
         if (execResult) {

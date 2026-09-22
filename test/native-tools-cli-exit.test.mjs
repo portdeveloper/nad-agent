@@ -16,6 +16,10 @@
 import { describe, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { completeWithTools } from "../src/agent.mjs";
 import { runNativeToolLoop } from "../src/nativeToolLoop.mjs";
 import {
@@ -267,3 +271,82 @@ describe("CLI exit path — scripted exit codes via the real stack", () => {
 
 console.log("\n✓ CLI exit path: real cli.mjs handleAction + prompt selection + hadFailure mapping");
 console.log("✓ SDK toolError and turn exhaustion exit 1 with the message intact; clean turns exit 0");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. REAL subprocess: dist/cli.mjs in scripted mode with an injected model.
+//    The tests above reconstruct the stack in-process; these verify processLine
+//    wiring and the actual process exit code end to end. Only the model is
+//    faked (loader hook → test/helpers/shim-qvac.mjs — no GPU, no live model);
+//    wallet init (dry-run), history, the native loop and process.exit are all
+//    production code paths.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHIM_REGISTER = fileURLToPath(new URL("./helpers/shim-register.mjs", import.meta.url));
+const DIST_CLI = fileURLToPath(new URL("../dist/cli.mjs", import.meta.url));
+// --import must be a file:// URL: a bare absolute path is rejected by the ESM
+// loader on Windows (ERR_UNSUPPORTED_ESM_URL_SCHEME). The entry point itself
+// stays a plain filesystem path, which node accepts on every platform.
+const SHIM_REGISTER_URL = pathToFileURL(SHIM_REGISTER).href;
+// Standard BIP-39 test vector — valid checksum, never funded. initWallet only
+// derives locally from it (dry-run); the startup balance read is best-effort.
+const TEST_SEED = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const shimStateDir = mkdtempSync(join(tmpdir(), "nad-shim-"));
+
+function runRealCli(scenario) {
+  assert.ok(existsSync(DIST_CLI), "dist/cli.mjs missing — run npm run build first (CI builds before testing)");
+  const env = {
+    ...process.env,
+    WDK_SEED: TEST_SEED,
+    QVAC_MODEL_PATH: "shim-model.gguf", // consumed by the shim, never read
+    USE_NATIVE_TOOLS: "true",
+    MONAD_NETWORK: "testnet",
+    NAD_STATE_PATH: join(shimStateDir, `${scenario}.json`),
+    NAD_POLICY: join(shimStateDir, "no-policy.json"), // absent → no policy
+    NAD_MCP_CONFIG: join(shimStateDir, "no-mcp.json"), // absent → no servers
+    NAD_SHIM_SCENARIO: scenario,
+    NO_COLOR: "1",
+  };
+  delete env.NAD_CLI_NO_RUN; // this file sets it to import cli.mjs; the child must REALLY run
+  delete env.PIMLICO_API_KEY; // force dry-run regardless of the developer shell
+  delete env.PIMLICO_SPONSORSHIP_POLICY_ID;
+  try {
+    const stdout = execFileSync(process.execPath, ["--import", SHIM_REGISTER_URL, DIST_CLI], {
+      env,
+      input: "hello\n", // one scripted NL line; the shimmed model ignores its content
+      encoding: "utf8",
+      timeout: 120000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return { status: 0, stdout, stderr: "" };
+  } catch (err) {
+    return { status: err.status, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
+  }
+}
+
+describe("real CLI subprocess — scripted process exit with an injected model", () => {
+  test("refusal from the real dispatch path exits 1 with the Refused line", () => {
+    const r = runRealCli("refusal");
+    assert.equal(r.status, 1, `expected exit 1, transcript:\n${r.stderr}`);
+    assert.match(r.stderr, /Refused: "not-an-address" is not a valid address\./);
+  });
+
+  test("SDK toolError exits 1 with code and message intact", () => {
+    const r = runRealCli("sdk-error");
+    assert.equal(r.status, 1, `expected exit 1, transcript:\n${r.stderr}`);
+    assert.match(r.stderr, /VALIDATION_ERROR/);
+    assert.match(r.stderr, /shim SDK says no/);
+  });
+
+  test("turn exhaustion exits 1 via processLine wiring", () => {
+    const r = runRealCli("turn-exhaust");
+    assert.equal(r.status, 1, `expected exit 1, transcript:\n${r.stderr}`);
+    assert.match(r.stderr, /turn limit \(10\) reached/);
+  });
+
+  test("clean native turn exits 0", () => {
+    const r = runRealCli("ok");
+    assert.equal(r.status, 0, `expected exit 0, transcript:\n${r.stderr}${r.stdout}`);
+  });
+});
+
+console.log("✓ Real CLI subprocess: refusal / SDK-error / turn-exhaust exit 1, clean turn exits 0");
