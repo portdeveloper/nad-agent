@@ -22,33 +22,55 @@ const DEFAULT_PATH = resolve(HERE, "..", "policy.json");
  * Load and validate `policy.json` (override with NAD_POLICY). Returns null when
  * no file exists. Throws on a malformed policy: a policy that cannot be parsed
  * must stop the agent, never silently permit everything.
+ *
+ * A missing file is only optional when nobody asked for that file. `NAD_POLICY` is an operator
+ * saying "use this one", so a typo in it used to start the agent with no limits and no allowlist
+ * at all — the same silent everything-permitted state a malformed file already refuses to cause.
+ * An explicit argument keeps its older meaning: the caller named the path and owns the result.
  */
-export function loadPolicy(path = process.env.NAD_POLICY || DEFAULT_PATH) {
+export function loadPolicy(path) {
+  // The value is used exactly as configured, never trimmed: a filesystem path may legitimately
+  // carry leading or trailing whitespace, and trimming it opens a DIFFERENT file. On Linux
+  // `policy.json ` and `policy.json` are two paths, so a trim could quietly swap a policy with
+  // rules for one without any. Only a completely empty value means "no override"; a blank one is
+  // a path the operator typed, and if nothing is there the startup has to say so.
+  const override = process.env.NAD_POLICY ?? "";
+  const selected = path ?? (override !== "" ? override : DEFAULT_PATH);
+  const isOverride = path === undefined && override !== "";
   let raw;
   try {
-    raw = readFileSync(path, "utf8");
+    raw = readFileSync(selected, "utf8");
   } catch (err) {
-    if (err.code === "ENOENT") return null;
-    throw new Error(`policy file ${path} could not be read: ${err.message}`);
+    if (err.code === "ENOENT") {
+      // A dangling symlink lands here too: the open follows the link and misses its target.
+      if (isOverride) {
+        throw new Error(
+          `policy file ${selected} does not exist, and NAD_POLICY points at it: ` +
+            `create the file or unset NAD_POLICY to run without a policy`,
+        );
+      }
+      return null;
+    }
+    throw new Error(`policy file ${selected} could not be read: ${err.message}`);
   }
 
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`policy file ${path} is not valid JSON: ${err.message}`);
+    throw new Error(`policy file ${selected} is not valid JSON: ${err.message}`);
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`policy file ${path} must contain a JSON object`);
+    throw new Error(`policy file ${selected} must contain a JSON object`);
   }
 
   const KNOWN_KEYS = new Set(["maxPerSend", "maxPerSession", "allowlist"]);
   const unknown = Object.keys(parsed).filter((k) => !KNOWN_KEYS.has(k));
   if (unknown.length) {
-    throw new Error(`policy file ${path} contains unknown key${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}`);
+    throw new Error(`policy file ${selected} contains unknown key${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}`);
   }
 
-  const policy = { path, maxPerSend: null, maxPerSession: null, allowlist: null };
+  const policy = { path: selected, maxPerSend: null, maxPerSession: null, allowlist: null };
 
   for (const key of ["maxPerSend", "maxPerSession"]) {
     if (parsed[key] == null) continue;

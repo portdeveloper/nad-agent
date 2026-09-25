@@ -58,7 +58,9 @@ the wallet enforces it before every confirmation prompt:
   rather than silently skipping a rule the wallet cannot evaluate.
 
 Every field is optional and **no file means no policy**, so behavior is unchanged unless you opt
-in. A violation is refused before the prompt, naming the rule
+in. The one exception is a file you asked for: if `NAD_POLICY` names a path that does not exist,
+startup stops and says so, because a typo there would otherwise run the agent with none of the
+limits you configured. A violation is refused before the prompt, naming the rule
 (`policy maxPerSend: amount 0.9 MON is above the policy limit of 0.5 MON per send.`), and the
 confirmation block gains a `Policy:` line showing what applied. A malformed policy file stops the
 agent at startup instead of being ignored.

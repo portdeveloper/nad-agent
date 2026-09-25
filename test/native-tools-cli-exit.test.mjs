@@ -16,7 +16,7 @@
 import { describe, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -291,6 +291,8 @@ const SHIM_REGISTER_URL = pathToFileURL(SHIM_REGISTER).href;
 // derives locally from it (dry-run); the startup balance read is best-effort.
 const TEST_SEED = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const shimStateDir = mkdtempSync(join(tmpdir(), "nad-shim-"));
+const EMPTY_POLICY = join(shimStateDir, "empty-policy.json");
+writeFileSync(EMPTY_POLICY, "{}");
 
 function runRealCli(scenario) {
   assert.ok(existsSync(DIST_CLI), "dist/cli.mjs missing — run npm run build first (CI builds before testing)");
@@ -301,7 +303,10 @@ function runRealCli(scenario) {
     USE_NATIVE_TOOLS: "true",
     MONAD_NETWORK: "testnet",
     NAD_STATE_PATH: join(shimStateDir, `${scenario}.json`),
-    NAD_POLICY: join(shimStateDir, "no-policy.json"), // absent → no policy
+    // An empty policy object rather than an absent file: a nonempty NAD_POLICY now means the
+    // operator chose that file, and a missing one stops startup. `{}` keeps this harness's
+    // intent, which is a run with no rules rather than a run with no policy file.
+    NAD_POLICY: EMPTY_POLICY,
     NAD_MCP_CONFIG: join(shimStateDir, "no-mcp.json"), // absent → no servers
     NAD_SHIM_SCENARIO: scenario,
     NO_COLOR: "1",
