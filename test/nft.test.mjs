@@ -391,6 +391,64 @@ describe("normalizeNftPage — one bad row must not discard the response", () =>
   });
 });
 
+describe("normalizeNftPage — token ids are validated before they are coerced (issue #110)", () => {
+  // Parsed from text on purpose: the precision loss happens inside JSON.parse, before any line
+  // of this repository runs, so an object literal holding the number would test something else.
+  const parsed = (json) => JSON.parse(json);
+
+  it("skips a numeric id past 2^53 instead of listing its rounded neighbour", () => {
+    const page = parsed(
+      `{"tokens":[{"token":{"contract":"${CONTRACT_A}","tokenId":9007199254740993}},` +
+        `{"token":{"contract":"${CONTRACT_A}","tokenId":"7"}}]}`,
+    );
+    const { tokens, skipped } = normalizeNftPage(page);
+    assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "7" }]);
+    assert.equal(skipped, 1);
+  });
+
+  it("skips a row whose id cannot be turned into a string, and keeps the page", () => {
+    // String() threw on this one, and the throw discarded every token on the page with it.
+    const page = parsed(
+      `{"tokens":[{"token":{"contract":"${CONTRACT_A}","tokenId":{"toString":null}}},` +
+        `{"token":{"contract":"${CONTRACT_A}","tokenId":"7"}}]}`,
+    );
+    const { tokens, skipped } = normalizeNftPage(page);
+    assert.deepEqual(tokens, [{ contract: CONTRACT_A, tokenId: "7" }]);
+    assert.equal(skipped, 1);
+  });
+
+  it("skips ids that no uint256 can hold, using the same rule as the transfer path", () => {
+    const page = {
+      tokens: [
+        good("abc"),
+        good("-1"),
+        good(`${1n << 256n}`), // one past the largest uint256
+        good(1.5),
+        good(-1),
+        good(true),
+        good([]),
+        good("7"),
+      ],
+    };
+    const { tokens, skipped } = normalizeNftPage(page);
+    assert.deepEqual(tokens.map((t) => t.tokenId), ["7"]);
+    assert.equal(skipped, 7);
+  });
+
+  it("keeps the full uint256 range when the id is a string, exactly as written", () => {
+    const max = `${(1n << 256n) - 1n}`;
+    const page = parsed(
+      `{"tokens":[{"token":{"contract":"${CONTRACT_A}","tokenId":"9007199254740993"}},` +
+        `{"token":{"contract":"${CONTRACT_A}","tokenId":"${max}"}},` +
+        `{"token":{"contract":"${CONTRACT_A}","tokenId":"0x1f"}},` +
+        `{"token":{"contract":"${CONTRACT_A}","tokenId":9007199254740991}}]}`,
+    );
+    const { tokens, skipped } = normalizeNftPage(page);
+    assert.deepEqual(tokens.map((t) => t.tokenId), ["9007199254740993", max, "0x1f", "9007199254740991"]);
+    assert.equal(skipped, 0);
+  });
+});
+
 describe("normalizeNftPage — truncation is reported, not silent", () => {
   it("flags a page that has a continuation cursor", () => {
     const { tokens, truncated } = normalizeNftPage({ tokens: [good("1")], continuation: "cursor-abc" });

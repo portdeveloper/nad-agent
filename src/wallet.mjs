@@ -442,9 +442,15 @@ export function normalizeNftPage(data) {
   let skipped = 0;
   for (const entry of rows) {
     const t = entry?.token ?? {};
-    // A token with no id is not addressable: String(undefined) would put the literal
-    // "undefined" in the rendered list and hand it to transfer_nft as a tokenId.
-    if (t.tokenId === undefined || t.tokenId === null || String(t.tokenId).trim() === "") {
+    // The id is checked with the transfer path's own rule, and before anything coerces it.
+    // String() was the first thing to touch it, which went wrong three ways: a missing id
+    // listed as "undefined", a number past 2^53 had already been rounded by JSON.parse and
+    // listed as a plausible id the wallet does not hold, and an id whose toString is not
+    // callable threw out of the loop and discarded every good row on the page. One rule for
+    // both paths, so a listed id is always one transfer_nft will accept as written.
+    try {
+      requireTokenId(t.tokenId);
+    } catch {
       skipped += 1;
       continue;
     }
@@ -463,6 +469,8 @@ export function normalizeNftPage(data) {
     const name = typeof t.name === "string" && t.name ? t.name : undefined;
     tokens.push({
       contract,
+      // Safe now: only a string, a safe integer or a bigint gets here, and a string is listed
+      // exactly as the indexer wrote it, so a large id keeps its digits.
       tokenId: String(t.tokenId),
       ...(name ? { name } : {}),
     });
@@ -501,6 +509,9 @@ const MAX_TOKEN_ID = (1n << 256n) - 1n;
  * So: only a string, a number or a bigint is considered, an empty or blank string is not a
  * value, and the result has to fit the `uint256` the ABI declares. Hex stays welcome; `"0"`
  * stays a token id, which is exactly what `""` must stop being.
+ *
+ * normalizeNftPage applies the same rule to indexer rows, so an id get_nfts lists is one this
+ * accepts; change it here and both paths move together.
  *
  * Throws rather than returning null because both refusals already in this file throw, and the
  * value is deliberately left out of the message: `transferNft` echoes a raw tokenId at its
