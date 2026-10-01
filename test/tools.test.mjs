@@ -7,7 +7,7 @@
 
 import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
-import { ACTIONS, parseAction, isWrite, describeAction, systemPrompt, runAction } from "../src/tools.mjs";
+import { ACTIONS, parseAction, isWrite, describeAction, systemPrompt, runAction, isRefusal } from "../src/tools.mjs";
 import { config } from "../src/config.mjs";
 
 // ---------------------------------------------------------------------------
@@ -340,6 +340,15 @@ test("unknown token balance errors explain when the catalog is empty", async () 
   } finally {
     KNOWN_TOKENS.testnet = previousCatalog;
   }
+});
+
+test("get_token_balance refuses a token address with a bad checksum instead of throwing", async () => {
+  const BAD = "0x534B2f3A21130D7A60830C2Df862319E593943A3";
+  const result = await runAction({ action: "get_token_balance", token: BAD });
+  assert.equal(isRefusal(result), true);
+  assert.match(result, /^Refused:/);
+  assert.match(result, /checksum failed/);
+  assert.match(result, new RegExp(BAD));
 });
 
 // ─── Native tool-calling tests ───────────────────────────────────────────────

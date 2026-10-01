@@ -10,7 +10,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseAction, describeAction, runAction, isWrite, ACTIONS, systemPrompt } from "../src/tools.mjs";
+import { parseAction, describeAction, runAction, isWrite, ACTIONS, systemPrompt, isRefusal } from "../src/tools.mjs";
 import { buildNftTransferCalldata, ERC721_ABI, normalizeNftPage, transferNft } from "../src/wallet.mjs";
 import { Interface, getAddress } from "ethers";
 import { config } from "../src/config.mjs";
@@ -182,6 +182,15 @@ describe("runAction — get_nfts / transfer_nft guards", () => {
   it("get_nfts with invalid address returns refusal", async () => {
     const res = await runAction({ action: "get_nfts", address: "not-an-address" });
     assert.match(String(res), /refused/i);
+  });
+
+  it("get_nfts with bad address checksum returns refusal instead of throwing", async () => {
+    const BAD = "0x534B2f3A21130D7A60830C2Df862319E593943A3";
+    const res = await runAction({ action: "get_nfts", address: BAD });
+    assert.equal(isRefusal(res), true);
+    assert.match(String(res), /^Refused:/);
+    assert.match(String(res), /checksum failed/);
+    assert.match(String(res), new RegExp(BAD));
   });
 
   it("transfer_nft with invalid to returns refusal", async () => {

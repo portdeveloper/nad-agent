@@ -947,7 +947,16 @@ export async function runAction(a, resolved, opts = {}) {
         const bal = await wallet.getBalance();
         return `${formatMon(bal)} ${SYMBOL()}`;
       }
-      const token = resolveToken(input);
+      let token;
+      try {
+        token = resolveToken(input);
+      } catch (err) {
+        const detail = err?.shortMessage || err?.message || "invalid token identifier";
+        if (/checksum/i.test(detail)) {
+          return `Refused: invalid token address "${safeEcho(input)}" (checksum failed)`;
+        }
+        return `Refused: invalid token "${safeEcho(input)}": ${safeEcho(detail)}`;
+      }
       if (!token) {
         return unknownTokenMessage(input);
       }
@@ -1012,8 +1021,16 @@ export async function runAction(a, resolved, opts = {}) {
 
     case "get_nfts": {
       const owner = a.address ?? a.owner;
-      if (owner && !isAddress(owner)) {
-        return `Refused: "${String(owner).trim()}" is not a valid address.`;
+      if (owner) {
+        const trimmed = String(owner).trim();
+        if (!isAddress(trimmed)) {
+          return `Refused: "${safeEcho(trimmed)}" is not a valid address.`;
+        }
+        try {
+          toChecksumAddress(trimmed);
+        } catch {
+          return `Refused: "${safeEcho(trimmed)}" is not a valid address (checksum failed)`;
+        }
       }
       const { tokens, skipped, truncated } = await wallet.getNfts(owner);
       // Notes, not silence: an empty list caused by unusable rows must not read as "you own
