@@ -15,7 +15,11 @@
  *                  then a text-only turn (exit 1 — the refusal must stick)
  *   sdk-error    — a toolError event with a fixed message (exit 1)
  *   turn-exhaust — a get_address tool call on EVERY turn (exit 1 via turn limit)
+ *
+ * NAD_SHIM_CALL_LOG, when set, names a file that gets one line per completion() call, so a test
+ * can prove a command never reached the model (slash commands must not).
  */
+import { appendFileSync } from "node:fs";
 
 let calls = 0;
 
@@ -73,6 +77,7 @@ export async function unloadModel(_params) {
 }
 
 export function completion(_params, _opts) {
+  if (process.env.NAD_SHIM_CALL_LOG) appendFileSync(process.env.NAD_SHIM_CALL_LOG, "completion\n");
   const scenario = process.env.NAD_SHIM_SCENARIO || "ok";
   const events = eventsFor(scenario);
   return {

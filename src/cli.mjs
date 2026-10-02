@@ -8,6 +8,7 @@
  *   /address           show the agent's wallet address
  *   /balance [token]   show native MON or ERC-20 token balance
  *   /history           show recent MON transactions
+ *   /nfts [address]    list ERC-721 NFTs held by the active account or an address
  *   /send <to> <mon>   send MON (asks for confirmation)
  *   /swap <amt> <in> <out>  swap tokens on PuddleSwap (asks for confirmation)
  *   /account [index]   list or switch derived account
@@ -465,6 +466,17 @@ async function handleSlash(line) {
       }
       return true;
     }
+    case "nfts":
+      // Same read as asking "what NFTs do I own?", minus the model: get_nfts through handleAction,
+      // so the active account default, the address refusals and the indexer/network refusals are
+      // the ones runAction already has. Extra arguments get the usage line and, in a script, a
+      // failing exit, like /history and /send.
+      if (rest.length > 1) {
+        println(c.dim("  usage: /nfts [address]") + "\n");
+        if (SCRIPTED) hadFailure = true;
+        return true;
+      }
+      return handleAction(rest.length ? { action: "get_nfts", address: rest[0] } : { action: "get_nfts" });
     case "send":
       // Wrong arity gets the usage line, not a confusing refusal about
       // "undefined" being a bad address. Scripted mode still counts it as a
@@ -492,6 +504,7 @@ async function handleSlash(line) {
           "  " + c.cyan("/address") + c.dim("           the agent's wallet address") + "\n" +
           "  " + c.cyan("/balance [token]") + c.dim("   native MON or ERC-20 balance") + "\n" +
           "  " + c.cyan("/history") + c.dim("           recent MON transactions") + "\n" +
+          "  " + c.cyan("/nfts [address]") + c.dim("    ERC-721 NFTs held by you or an address") + "\n" +
           "  " + c.cyan("/send <to> <mon>") + c.dim("   send MON (asks you to confirm)") + "\n" +
           "  " + c.cyan("/account [index]") + c.dim("   list / switch derived account") + "\n" +
           "  " + c.cyan("/swap <amt> <in> <out>") + c.dim("  swap tokens on PuddleSwap") + "\n" +

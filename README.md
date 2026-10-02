@@ -176,7 +176,7 @@ Then talk to it:
 › swap 0.1 MON for USDC              # quotes best PuddleSwap path, you confirm, then dry-run or swap
 ```
 
-Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/history` `/send <to> <mon>` `/account [index]` `/swap <amt> <in> <out>` `/config` `/help` `/exit`. Token sends and NFT actions (`send_token`, `get_nfts`, `transfer_nft`) have no slash command — those are natural-language requests and need the model.
+Or use the reliable slash-commands (no model needed): `/address` `/balance` `/balance <token>` `/history` `/nfts [address]` `/send <to> <mon>` `/account [index]` `/swap <amt> <in> <out>` `/config` `/help` `/exit`. Token sends and NFT transfers (`send_token`, `transfer_nft`) have no slash command — those are natural-language requests and need the model.
 
 ---
 
