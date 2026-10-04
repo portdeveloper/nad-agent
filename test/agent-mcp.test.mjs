@@ -177,6 +177,86 @@ describe("completeWithMcp — round limit", () => {
   });
 });
 
+describe("completeWithMcp — built-in tools alongside MCP", () => {
+  const BUILTIN = [
+    { type: "function", name: "send_mon", description: "d", parameters: { type: "object", properties: {}, required: [] } },
+    { type: "function", name: "get_balance", description: "d", parameters: { type: "object", properties: {}, required: [] } },
+  ];
+
+  test("advertises our tools in the same completion request as mcp", async () => {
+    const seen = [];
+    const runCompletion = (params) => {
+      seen.push(params);
+      return fakeRun({ events: [], final: { contentText: "hi", toolCalls: [] } });
+    };
+    await completeWithMcp([{ role: "user", content: "hello" }], {
+      mcpClients: [{ name: "s", client: {} }],
+      tools: BUILTIN,
+      runCompletion,
+    });
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].tools, BUILTIN);
+    assert.equal(seen[0].mcp.length, 1);
+  });
+
+  test("no tools → the request is the MCP-only shape it replaces", async () => {
+    const seen = [];
+    const runCompletion = (params) => {
+      seen.push(params);
+      return fakeRun({ events: [], final: { contentText: "hi", toolCalls: [] } });
+    };
+    await completeWithMcp([], { mcpClients: [{ name: "s", client: {} }], runCompletion });
+    assert.equal("tools" in seen[0], false, "an empty tool list must not add a key to the request");
+  });
+
+  test("a built-in name goes to invokeNativeToolCall, an MCP name to invokeToolCall", async () => {
+    let calls = 0;
+    const runCompletion = () => {
+      calls++;
+      if (calls === 1) {
+        return fakeRun({
+          events: [],
+          final: {
+            contentText: "",
+            toolCalls: [
+              { id: "1", name: "send_mon", arguments: { amountMon: "1" } },
+              { id: "2", name: "srv_tool", arguments: {} },
+            ],
+          },
+        });
+      }
+      return fakeRun({ events: [], final: { contentText: "done", toolCalls: [] } });
+    };
+    const native = [];
+    const mcp = [];
+    const history = [];
+    await completeWithMcp(history, {
+      mcpClients: [{ name: "s", client: {} }],
+      tools: BUILTIN,
+      runCompletion,
+      invokeNativeToolCall: async (call) => { native.push(call); return "native result"; },
+      invokeToolCall: async (call) => { mcp.push(call); return "mcp result"; },
+    });
+
+    assert.deepEqual(native.map((c) => c.name), ["send_mon"]);
+    assert.deepEqual(mcp.map((c) => c.name), ["srv_tool"]);
+    // Both results are fed back so the model can react to either.
+    assert.deepEqual(history.filter((m) => m.role === "tool"), [
+      { role: "tool", content: "native result" },
+      { role: "tool", content: "mcp result" },
+    ]);
+  });
+
+  test("throws when the model calls a built-in tool with no invokeNativeToolCall", async () => {
+    const runCompletion = () =>
+      fakeRun({ events: [], final: { contentText: "", toolCalls: [{ id: "1", name: "send_mon", arguments: {} }] } });
+    await assert.rejects(
+      () => completeWithMcp([], { mcpClients: [{ name: "s", client: {} }], tools: BUILTIN, runCompletion }),
+      /invokeNativeToolCall is required/,
+    );
+  });
+});
+
 describe("completeWithMcp — model stream error", () => {
   test("does not throw when the event stream errors, and stops the loop", async () => {
     const runCompletion = () => ({

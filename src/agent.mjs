@@ -77,9 +77,19 @@ export async function complete(history, onToken) {
  * the model stops calling tools — or `maxToolRounds` is hit, so a runaway
  * tool-call loop cannot hang the agent forever.
  *
- * `invokeToolCall(call)` executes one call and must resolve to a string for
- * history; this function has no UI, so confirmation/refusal is entirely the
- * caller's decision (cli.mjs gates every call behind a y/N prompt).
+ * `tools` are this agent's OWN built-in tools, advertised to the same model in
+ * the same request as the MCP servers' (the SDK merges both lists). Advertised
+ * is not enough on its own: a call whose name is one of ours is a wallet action
+ * and must go to `invokeNativeToolCall`, which routes writes through
+ * handleAction's resolve → policy → preview → confirm boundary. MCP tools have
+ * no such boundary, so they go to `invokeToolCall` instead — cli.mjs gates that
+ * one behind its own y/N prompt. Routing by name is what keeps an MCP server
+ * from ever being handed a `send_mon`, and keeps a wallet action from being
+ * answered by an MCP handler.
+ *
+ * `invokeToolCall(call)` / `invokeNativeToolCall(call)` execute one call and
+ * must resolve to a string for history; this function has no UI, so
+ * confirmation/refusal is entirely the caller's decision.
  *
  * `runCompletion` is a test seam — it defaults to QVAC's own `completion()`,
  * lazily imported like every other QVAC call in this file, but a caller can
@@ -92,16 +102,22 @@ export async function complete(history, onToken) {
  */
 export async function completeWithMcp(
   history,
-  { mcpClients = [], onToken, invokeToolCall, maxToolRounds = 8, runCompletion } = {},
+  { mcpClients = [], tools = [], onToken, invokeToolCall, invokeNativeToolCall, maxToolRounds = 8, runCompletion } = {},
 ) {
   const doCompletion = runCompletion ?? (await qvac()).completion;
   const mcp = mcpClients.map((c) => ({ client: c.client, includeResources: false }));
+  // Membership decides the handler. An empty list keeps the completion request
+  // byte-identical to the MCP-only behaviour it replaces.
+  const nativeToolNames = new Set(tools.map((t) => t.name));
   const toolErrors = [];
   let text = "";
   let rounds = 0;
 
   for (;;) {
-    const run = doCompletion({ modelId, history, mcp, stream: true }, { timeout: 300_000 });
+    const run = doCompletion(
+      { modelId, history, ...(tools.length ? { tools } : {}), mcp, stream: true },
+      { timeout: 300_000 },
+    );
     try {
       for await (const event of run.events) {
         if (event.type === "contentDelta") {
@@ -132,6 +148,17 @@ export async function completeWithMcp(
     // caller to push, matching how complete() leaves that to its caller too.
     history.push({ role: "assistant", content: text });
     for (const call of toolCalls) {
+      const isNative = nativeToolNames.has(call.name);
+      if (isNative) {
+        if (!invokeNativeToolCall) {
+          throw new Error(
+            `completeWithMcp: invokeNativeToolCall is required when the model calls the built-in tool "${call.name}"`,
+          );
+        }
+        const result = await invokeNativeToolCall(call);
+        history.push({ role: "tool", content: String(result ?? "") });
+        continue;
+      }
       if (!invokeToolCall) {
         throw new Error("completeWithMcp: invokeToolCall is required when the model calls a tool");
       }

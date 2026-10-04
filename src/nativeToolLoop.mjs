@@ -8,6 +8,13 @@
  * from tests. The full REPL also imports this: every dependency (model, dispatch,
  * print helpers, mode flags) is passed in, so the same code drives both the
  * interactive REPL and a scripted test.
+ *
+ * This file hosts BOTH turn drivers and the one boundary they share:
+ *   - runNativeToolLoop — MCP not connected: `completeWithTools` drives the turn.
+ *   - runMcpTurn        — MCP connected: `completeWithMcp` drives the turn with
+ *                         the built-in tools advertised alongside the servers',
+ *                         and every call routed through dispatchNativeCall below.
+ * Both exist so a native write cannot reach the wallet by any other road.
  */
 
 import { isRefusal } from "./tools.mjs";
@@ -30,6 +37,45 @@ export function formatToolError(toolErr) {
   const code = toolErr?.code ?? (typeof nested === "object" ? nested?.code : null) ?? null;
   const text = message ?? "malformed tool call";
   return code ? `[${code}]: ${text}` : text;
+}
+
+/**
+ * Route ONE native tool call through the safety boundary. This is the seam both
+ * turn drivers share, and the reason it exists is a write:
+ *
+ *   ROUTE THROUGH THE SAFETY BOUNDARY.
+ *
+ * Writes (send_mon, send_token, transfer_nft, swap) and account-switch (account
+ * with an index) MUST go through handleAction so they share the recipient
+ * resolution, spend policy, preview, mainnet ack, and y/N confirmation the v0
+ * path and the slash commands already use. Anything else is a read —
+ * dispatchToolCall is fine and stays snappy.
+ *
+ * Returns `{ result, boundary }`. `boundary` says who printed it: handleAction
+ * prints its own results and refusals as it produces them, dispatchToolCall
+ * prints nothing — so a caller that also printed every result would show writes
+ * twice and reads never.
+ *
+ * Throws are left to the caller: both turn drivers turn them into an
+ * `Error: …` result and a scripted failure.
+ *
+ * @param call  { name, arguments } — one tool call from the model.
+ * @param deps  { handleAction, dispatchToolCall, isWrite } — injected by cli.mjs
+ *              so tests can prove which side of the seam answered.
+ */
+export async function dispatchNativeCall(
+  { name, arguments: args = {} },
+  { handleAction, dispatchToolCall, isWrite },
+) {
+  const isAccountSwitch =
+    name === "account" &&
+    args.index !== undefined &&
+    args.index !== null &&
+    args.index !== "";
+  if (isWrite(name) || isAccountSwitch) {
+    return { result: await handleAction({ action: name, ...args }), boundary: "handleAction" };
+  }
+  return { result: await dispatchToolCall(name, args), boundary: "dispatchToolCall" };
 }
 
 /**
@@ -118,26 +164,13 @@ export async function runNativeToolLoop({
       // Dispatch each tool call and collect results for history.
       const toolResults = [];
       for (const toolCall of result.toolCalls) {
-        const action = { action: toolCall.name, ...toolCall.arguments };
         let execResult = null;
 
         try {
-          // ROUTE THROUGH THE SAFETY BOUNDARY.
-          //
-          // Writes (send_mon, send_token, transfer_nft, swap) and account-switch
-          // (account with an index) MUST go through handleAction so they share the
-          // recipient resolution, spend policy, preview, mainnet ack, and y/N
-          // confirmation the v0 path and the slash commands already use. Anything
-          // else is a read — dispatchToolCall is fine and stays snappy.
-          const isAccountSwitch = toolCall.name === "account" &&
-            toolCall.arguments.index !== undefined &&
-            toolCall.arguments.index !== null &&
-            toolCall.arguments.index !== "";
-          if (isWrite(toolCall.name) || isAccountSwitch) {
-            execResult = await handleAction(action);
-          } else {
-            execResult = await dispatchToolCall(toolCall.name, toolCall.arguments);
-          }
+          // Through the shared boundary: writes → handleAction, reads →
+          // dispatchToolCall (see dispatchNativeCall above).
+          const routed = await dispatchNativeCall(toolCall, { handleAction, dispatchToolCall, isWrite });
+          execResult = routed.result;
         } catch (err) {
           execResult = `Error: ${err.message || String(err)}`;
           if (SCRIPTED) hadFailure.value = true;
@@ -189,4 +222,122 @@ export async function runNativeToolLoop({
     println(c.red(`  turn limit (${MAX_TURNS}) reached — the model is still calling tools; stopping.`) + "\n");
     if (SCRIPTED) hadFailure.value = true;
   }
+}
+
+/**
+ * One turn with MCP servers connected — the counterpart of runNativeToolLoop.
+ *
+ * Advertising the built-in tools is only half the fix for "an MCP server
+ * disables every wallet tool": the model can now emit BOTH kinds of call in one
+ * turn, and each has to reach the right handler. So this driver:
+ *
+ *   1. Completes with `completeWithMcp({ mcpClients, tools })` — the SDK merges
+ *      our tool definitions and the servers' into one request, so the prompt's
+ *      promises and the model's catalogue match again.
+ *   2. Routes every built-in call through dispatchNativeCall — the SAME
+ *      handleAction boundary (resolve → policy → preview → mainnet ack → y/N)
+ *      the slash commands, the v0 path and runNativeToolLoop use. An MCP server
+ *      never answers a wallet action.
+ *   3. Leaves MCP calls to `invokeToolCall`, which cli.mjs gates behind its own
+ *      confirmation before any server sees the call.
+ *   4. Folds refusals, thrown errors, SDK toolErrors and a hit round limit into
+ *      `hadFailure`, so a scripted run still exits non-zero — the same
+ *      propagateHadFailure mapping the native loop feeds.
+ *
+ * Printing follows each handler's own contract: handleAction prints its write
+ * result itself (a second copy would be shown otherwise), while a read from
+ * dispatchToolCall is printed here. Every call sits in the same RST/DIM frame
+ * cli.mjs used around the MCP gate, so a result is never written while the
+ * model's dimmed stream is still open.
+ *
+ * Returns whatever `completeWithMcp` resolved to, so the caller can log the
+ * round count or surface a limit.
+ *
+ * @param ctx
+ * @param ctx.history            mutated in place: user/assistant/tool messages are appended.
+ * @param ctx.mcpClients         connected clients (cli.mjs module state).
+ * @param ctx.completeWithMcp    the real loop from agent.mjs (injectable seam).
+ * @param ctx.getToolDefinitions our built-in tools, advertised alongside MCP's.
+ * @param ctx.handleAction       the REAL CLI boundary — writes go here.
+ * @param ctx.dispatchToolCall   read-only fast path.
+ * @param ctx.isWrite            toolName -> boolean.
+ * @param ctx.onToken            streams the model's own tokens.
+ * @param ctx.invokeToolCall     the MCP gate (cli.mjs: confirm + invoke).
+ * @param ctx.printw / ctx.DIM / ctx.RST  presentation frame.
+ * @param ctx.println            line output (stdout interactive, stderr scripted).
+ * @param ctx.c                  color helpers.
+ * @param ctx.SCRIPTED           boolean — when true, failures must set hadFailure.
+ * @param ctx.hadFailure         mutable { value: boolean } shared with the REPL.
+ */
+export async function runMcpTurn({
+  history,
+  mcpClients,
+  completeWithMcp,
+  getToolDefinitions,
+  handleAction,
+  dispatchToolCall,
+  isWrite,
+  onToken,
+  invokeToolCall,
+  printw,
+  DIM,
+  RST,
+  println,
+  c,
+  SCRIPTED,
+  hadFailure,
+}) {
+  // One frame per call: the model's tokens stream dimmed, so anything printed
+  // while that is open would be dim too. RST before the result, DIM after.
+  const framed = async (fn) => {
+    printw(RST + "\n");
+    try {
+      return await fn();
+    } finally {
+      printw(DIM);
+    }
+  };
+
+  const invokeNativeToolCall = async (call) => {
+    let execResult = null;
+    let boundary = "handleAction";
+    try {
+      const routed = await framed(() => dispatchNativeCall(call, { handleAction, dispatchToolCall, isWrite }));
+      execResult = routed.result;
+      boundary = routed.boundary;
+    } catch (err) {
+      execResult = `Error: ${err.message || String(err)}`;
+      if (SCRIPTED) hadFailure.value = true;
+    }
+    if (boundary === "dispatchToolCall" && execResult) {
+      println("  " + c.cyan(String(execResult).replace(/\n/g, "\n  ")) + "\n");
+    }
+    // A returned refusal is a failure, same rule as the native loop and the
+    // v0 path — so a refused write over MCP still exits non-zero in a script.
+    if (execResult != null && isRefusal(execResult) && SCRIPTED) {
+      hadFailure.value = true;
+    }
+    return execResult;
+  };
+
+  const result = await completeWithMcp(history, {
+    mcpClients,
+    tools: getToolDefinitions(),
+    onToken,
+    invokeToolCall: (call) => framed(() => invokeToolCall(call)),
+    invokeNativeToolCall,
+  });
+  printw(RST + "\n");
+
+  history.push({ role: "assistant", content: result.text });
+  for (const e of result.toolErrors) {
+    println(c.red(`  tool error [${e.code}]: ${e.message}`));
+    if (SCRIPTED) hadFailure.value = true;
+  }
+  if (result.limitReached) {
+    println(c.yellow(`  (stopped after ${result.rounds} tool-call rounds — the model kept calling tools)`));
+    if (SCRIPTED) hadFailure.value = true;
+  }
+  println("");
+  return result;
 }

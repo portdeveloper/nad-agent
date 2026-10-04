@@ -95,7 +95,7 @@ import {
   getToolDefinitions,
   dispatchToolCall,
 } from "./tools.mjs";
-import { runNativeToolLoop } from "./nativeToolLoop.mjs";
+import { runNativeToolLoop, runMcpTurn } from "./nativeToolLoop.mjs";
 
 /**
  * Build the REPL's initial history with the prompt matching the enabled
@@ -241,6 +241,9 @@ async function confirm(question) {
  * MCP server exposes, discovered at runtime, so there is no reliable way to tell
  * a read apart from a write here the way isWrite() does for the built-in actions
  * — asking every time is the safe default, not a guess.
+ *
+ * Exported alongside handleAction so a test can prove the gate still refuses a
+ * call the operator has not approved, now that built-in tools share the turn.
  */
 async function invokeMcpToolCall(call) {
   println("\n  " + c.yellow(`MCP tool: ${call.name}(${JSON.stringify(call.arguments ?? {})})`));
@@ -607,39 +610,41 @@ async function main() {
     printw("  " + DIM);
 
     if (mcpClients.length) {
-      // MCP servers are connected: let QVAC call their tools directly, feeding
-      // each result back for a follow-up turn (completeWithMcp owns that loop).
-      // The model's raw output streams dimmed; tool-call confirmations and
-      // results print bright, same as everything else that needs an operator.
-      let result;
+      // MCP servers are connected, but so is our own toolset: the prompt below
+      // promises send_mon/get_balance/… and the model must reach the SAME
+      // handleAction boundary a slash command would, while each server's tools
+      // keep their own confirmation gate. The turn body — tools advertised
+      // alongside mcp, writes → handleAction, reads → dispatchToolCall, refusals
+      // and tool errors folded into hadFailure — lives in src/nativeToolLoop.mjs
+      // beside the native loop that shares its boundary; here we just pass in the
+      // handles it needs, exactly like that loop.
+      const hadFailureRef = { value: hadFailure };
       try {
-        result = await brain.completeWithMcp(history, {
+        await runMcpTurn({
+          history,
           mcpClients,
+          completeWithMcp: brain.completeWithMcp,
+          getToolDefinitions,
+          handleAction,
+          dispatchToolCall,
+          isWrite,
           onToken: (t) => printw(t),
-          invokeToolCall: async (call) => {
-            printw(RST + "\n");
-            const out = await invokeMcpToolCall(call);
-            printw(DIM);
-            return out;
-          },
+          invokeToolCall: invokeMcpToolCall,
+          printw,
+          DIM,
+          RST,
+          println,
+          c,
+          SCRIPTED,
+          hadFailure: hadFailureRef,
         });
-        printw(RST + "\n");
+        hadFailure = propagateHadFailure(hadFailureRef, hadFailure);
       } catch (err) {
         printw(RST);
         println(c.red(`  model error: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;
         return true;
       }
-      history.push({ role: "assistant", content: result.text });
-      for (const e of result.toolErrors) {
-        println(c.red(`  tool error [${e.code}]: ${e.message}`));
-        if (SCRIPTED) hadFailure = true;
-      }
-      if (result.limitReached) {
-        println(c.yellow(`  (stopped after ${result.rounds} tool-call rounds — the model kept calling tools)`));
-        if (SCRIPTED) hadFailure = true;
-      }
-      println("");
       return true;
     }
 
@@ -734,10 +739,10 @@ async function main() {
 }
 
 // Test seam: importing this module with NAD_CLI_NO_RUN=1 loads its exports
-// (handleAction, buildInitialHistory, propagateHadFailure) without starting the
-// REPL — which would otherwise drain stdin, load the model, and call
-// process.exit. Production entry points (npm start, node dist/cli.mjs) never set
-// it, so runtime behavior is unchanged.
+// (handleAction, invokeMcpToolCall, buildInitialHistory, propagateHadFailure)
+// without starting the REPL — which would otherwise drain stdin, load the
+// model, and call process.exit. Production entry points (npm start, node
+// dist/cli.mjs) never set it, so runtime behavior is unchanged.
 if (!process.env.NAD_CLI_NO_RUN) {
   main().catch((err) => {
     console.error(err);
@@ -745,4 +750,4 @@ if (!process.env.NAD_CLI_NO_RUN) {
   });
 }
 
-export { handleAction };
+export { handleAction, invokeMcpToolCall };
