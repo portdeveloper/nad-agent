@@ -193,6 +193,113 @@ describe("runAction — get_nfts / transfer_nft guards", () => {
     assert.match(String(res), new RegExp(BAD));
   });
 
+  /**
+   * What the wallet receives has to be what the checks approved.
+   *
+   * `String(["0x…"])` and `String({ toString })` both read as a valid address, so a check on a
+   * coerced copy passes and the original travels on as an array or an object. The control row
+   * is the point of the table: every shape below has to reach the same place a plain address
+   * reaches, and the only way to see that offline is that they all fail on the same missing
+   * indexer key rather than on a converter error.
+   */
+  const OWNER = "0x97682ff1A980a96D65Ea606b717441E3662c557E";
+  const USABLE_OWNERS = [
+    ["a plain address, the control", OWNER],
+    ["a padded address", ` ${OWNER} `],
+    ["an address in an array", [OWNER]],
+    ["an object whose toString is the address", { toString: () => OWNER }],
+  ];
+
+  for (const [name, address] of USABLE_OWNERS) {
+    it(`get_nfts carries ${name} to the wallet unchanged in meaning`, async () => {
+      // No indexer key in the test environment, so a shape that passed the checks and reached
+      // the wallet fails there and nowhere earlier. A converter error here means the value
+      // that travelled was not the value that was checked.
+      await assert.rejects(
+        runAction({ action: "get_nfts", address }),
+        (err) => /RESERVOIR_API_KEY/.test(err.message),
+        `${name} did not reach the indexer: it should fail only on the missing key`,
+      );
+    });
+  }
+
+  /**
+   * Present is not the same as truthy. Each of these skipped the checks entirely and reached
+   * `wallet.getNfts`, whose `ownerAddress = address` default only fires for `undefined` — so
+   * the operator was told the wallet was not initialised about a wallet that was open.
+   */
+  for (const [name, address] of [
+    ["an empty string", ""],
+    ["zero", 0],
+    ["false", false],
+  ]) {
+    it(`get_nfts refuses ${name} as an address rather than reaching the wallet`, async () => {
+      const res = await runAction({ action: "get_nfts", address });
+      assert.equal(isRefusal(res), true, `${name} did not produce a refusal: ${res}`);
+      assert.match(String(res), /is not a valid address/);
+      assert.doesNotMatch(String(res), /Wallet not initialized/);
+    });
+  }
+
+  it("get_nfts refuses an address it cannot even read as text, and says so", async () => {
+    // `String({ toString: null })` throws, and `{"toString": null}` is JSON a model can emit.
+    // The refusal has to name what failed: falling back to an empty string would also refuse,
+    // but it would report an empty address, which is not what was given. The value is not
+    // echoed, because reading it as text is the step that failed.
+    const res = await runAction({ action: "get_nfts", address: { toString: null } });
+    assert.equal(isRefusal(res), true, `no refusal: ${res}`);
+    assert.match(String(res), /could not be read as text/);
+    assert.doesNotMatch(String(res), /is not a valid address/);
+    assert.doesNotMatch(String(res), /Wallet not initialized/);
+  });
+
+  /**
+   * What the wallet is asked for when no usable owner was given.
+   *
+   * This cannot be checked through the error message. With no wallet, `getNfts(undefined)`
+   * resolves its own default to a null module address and `getNfts(null)` keeps the null —
+   * both answer "Wallet not initialized", so an assertion on that message holds whether the
+   * default fires or not. `undefined` is the only value that default reads, so the argument
+   * itself is the thing to assert, and the injected seam is how a test sees it.
+   */
+  for (const [name, action] of [
+    ["no owner field at all", { action: "get_nfts" }],
+    ["address: null", { action: "get_nfts", address: null }],
+    // The alias is the case a message-level test cannot reach. `??` skips a null left side,
+    // so `{address: null}` already arrives as undefined; `{owner: null}` is the right side
+    // and stays null unless something makes it undefined.
+    ["owner: null", { action: "get_nfts", owner: null }],
+    ["both null", { action: "get_nfts", address: null, owner: null }],
+  ]) {
+    it(`get_nfts asks the wallet for the active account with ${name}`, async () => {
+      let asked = "__not-called__";
+      await runAction(action, null, {
+        getNfts: async (owner) => {
+          asked = owner;
+          return { tokens: [], skipped: 0, truncated: false };
+        },
+      });
+      assert.equal(
+        asked,
+        undefined,
+        `${name} reached the wallet as ${JSON.stringify(asked)}; only undefined makes its owner default fire`,
+      );
+    });
+  }
+
+  it("get_nfts passes a usable address through untouched", async () => {
+    // The other side of the same seam: a given address must arrive as the normalized string,
+    // not as the shape it was written in.
+    let asked = "__not-called__";
+    await runAction({ action: "get_nfts", address: ` ${OWNER} ` }, null, {
+      getNfts: async (owner) => {
+        asked = owner;
+        return { tokens: [], skipped: 0, truncated: false };
+      },
+    });
+    assert.equal(asked, OWNER, "a padded address did not arrive trimmed");
+  });
+
   it("transfer_nft with invalid to returns refusal", async () => {
     const res = await runAction({ action: "transfer_nft", contractAddress: "0xabc", tokenId: "1", to: "not-an-address" });
     assert.match(String(res), /refused/i);

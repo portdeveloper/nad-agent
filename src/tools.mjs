@@ -915,6 +915,12 @@ export async function runAction(a, resolved, opts = {}) {
   // Same seam, same reason, for the NFT path: the guard added below refuses before the wallet
   // is touched, and nothing could observe that ordering while transferNft was called directly.
   const transferNft = opts.transferNft ?? wallet.transferNft;
+  // Injectable for one reason: whether the owner default fires is not observable from the
+  // outside. With no wallet, `getNfts(undefined)` resolves its default to a null module
+  // address and `getNfts(null)` keeps the null — both answer "Wallet not initialized", so a
+  // test on the message cannot tell a working default from a broken one. The seam lets the
+  // test read the argument instead. Default is the real call; no production caller passes it.
+  const getNfts = opts.getNfts ?? wallet.getNfts;
   // Read `resolved.address` once, here, and use that copy everywhere below: a getter or a
   // Proxy that answers the check with a valid address and the signature with another one is
   // otherwise free to do so. Padding is refused rather than trimmed, because isAddress()
@@ -1020,19 +1026,51 @@ export async function runAction(a, resolved, opts = {}) {
     }
 
     case "get_nfts": {
-      const owner = a.address ?? a.owner;
-      if (owner) {
-        const trimmed = String(owner).trim();
-        if (!isAddress(trimmed)) {
-          return `Refused: "${safeEcho(trimmed)}" is not a valid address.`;
+      const given = a.address ?? a.owner;
+      // Present is not the same as truthy. `""`, `0` and `false` are all values a model can
+      // emit for this field, and each one skipped the checks below and still reached the
+      // wallet: getNfts's `ownerAddress = address` default only fires for `undefined`, so its
+      // `!ownerAddress` guard answered "Wallet not initialized" about a wallet that was open.
+      // The transfer_nft case records the same trap for fromAddress.
+      //
+      // `?? undefined` for the same reason, one step quieter. `{address: null}` already
+      // arrives as `undefined` because `??` above skips a null left side, but `{owner: null}`
+      // does not: the alias is the right side, so `given` stays `null` and the wallet's
+      // default never fires. Omitted and null-via-alias have to mean the same thing, and
+      // `undefined` is the only value that default reads.
+      let owner = given ?? undefined;
+      if (given !== undefined && given !== null) {
+        // Validate and pass the same value. `String(["0x…"])` and `String({ toString })` both
+        // read as a valid address, so checking a coerced copy and then handing the wallet the
+        // original let an array or an object through the checks and onward as itself — the
+        // failure the transfer_nft case names in so many words.
+        //
+        // Trimmed rather than refused: resolveRecipient trims a padded address and carries the
+        // trimmed value (addressBook.mjs), and a read has nothing to sign, so there is no
+        // approved string to keep byte-for-byte.
+        //
+        // The coercion is itself a step that can fail: `String({ toString: null })` throws,
+        // and `{"toString": null}` is JSON a model can emit. A value that was given and
+        // cannot even be read as text is still a given unusable value, so it refuses here
+        // rather than letting the converter's error stand in for the refusal. The value is
+        // not echoed back, because reading it as text is exactly what failed.
+        let text;
+        try {
+          text = String(given);
+        } catch {
+          return "Refused: address was given but could not be read as text.";
+        }
+        owner = text.trim();
+        if (!isAddress(owner)) {
+          return `Refused: "${safeEcho(owner)}" is not a valid address.`;
         }
         try {
-          toChecksumAddress(trimmed);
+          toChecksumAddress(owner);
         } catch {
-          return `Refused: "${safeEcho(trimmed)}" is not a valid address (checksum failed)`;
+          return `Refused: "${safeEcho(owner)}" is not a valid address (checksum failed)`;
         }
       }
-      const { tokens, skipped, truncated } = await wallet.getNfts(owner);
+      const { tokens, skipped, truncated } = await getNfts(owner);
       // Notes, not silence: an empty list caused by unusable rows must not read as "you own
       // nothing", and a capped list must not read as the whole wallet.
       const notes = [];
@@ -1077,11 +1115,13 @@ export async function runAction(a, resolved, opts = {}) {
       // inside the wallet instead of the `Refused:` line every other rejection here produces.
       // An empty string did the same, because "" is only falsy at the call site — it still
       // reaches checksumAddress. Refuse before the wallet is touched, like the two above.
-      // Same rule the recipient above follows: padding is refused rather than trimmed,
-      // because isAddress() trims internally, so " 0x… " would pass the check and then reach
-      // the confirmation line ragged. Whatever is validated here is also what gets passed on,
-      // rather than re-reading a.fromAddress — an array or an object stringifies to a valid
-      // address for the check and travels onward as itself otherwise.
+      // Padding is refused rather than trimmed, because isAddress() trims internally, so
+      // " 0x… " would pass the check and then reach the confirmation line ragged. (Not the
+      // recipient's rule, as this said before: resolveRecipient trims and carries the trimmed
+      // value. The difference is that this string gets signed, so it is kept as approved.)
+      // Whatever is validated here is also what gets passed on, rather than re-reading
+      // a.fromAddress — an array or an object stringifies to a valid address for the check
+      // and travels onward as itself otherwise.
       let fromAddress = a.fromAddress;
       if (fromAddress !== undefined && fromAddress !== null) {
         fromAddress = String(fromAddress);
