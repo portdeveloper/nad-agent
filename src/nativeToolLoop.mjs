@@ -246,9 +246,11 @@ export async function runNativeToolLoop({
  *
  * Printing follows each handler's own contract: handleAction prints its write
  * result itself (a second copy would be shown otherwise), while a read from
- * dispatchToolCall is printed here. Every call sits in the same RST/DIM frame
- * cli.mjs used around the MCP gate, so a result is never written while the
- * model's dimmed stream is still open.
+ * dispatchToolCall is printed here. A call that THREW was printed by neither —
+ * the catch above does it, in red, once — so an operator always sees the cause
+ * and does not have to wait for the model to repeat it. Every call sits in the
+ * same RST/DIM frame cli.mjs used around the MCP gate, so a result is never
+ * written while the model's dimmed stream is still open.
  *
  * Returns whatever `completeWithMcp` resolved to, so the caller can log the
  * round count or surface a limit.
@@ -306,8 +308,15 @@ export async function runMcpTurn({
       execResult = routed.result;
       boundary = routed.boundary;
     } catch (err) {
+      // Nobody has printed this. The boundary that would have is the one that
+      // threw, so `boundary` below still reads "handleAction" and the read-only
+      // print would skip it: a scripted run would fail with only blank lines
+      // for a cause, and an interactive one would depend on the model choosing
+      // to repeat it. Say it here, once — the model still gets it as a result.
       execResult = `Error: ${err.message || String(err)}`;
+      println("  " + c.red(String(execResult).replace(/\n/g, "\n  ")) + "\n");
       if (SCRIPTED) hadFailure.value = true;
+      return execResult;
     }
     if (boundary === "dispatchToolCall" && execResult) {
       println("  " + c.cyan(String(execResult).replace(/\n/g, "\n  ")) + "\n");

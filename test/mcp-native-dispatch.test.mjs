@@ -16,7 +16,10 @@
  *   4. an MCP tool call still reaches the confirmation gate — the gate is
  *      unchanged and refuses a call the operator has not approved;
  *   5. tool errors and a hit round limit fold into hadFailure, so the CLI's
- *      `process.exit(hadFailure ? 1 : 0)` mapping still sees them.
+ *      `process.exit(hadFailure ? 1 : 0)` mapping still sees them;
+ *   6. a call that THROWS is printed once by the catch (the boundary that
+ *      would have printed it is the one that threw), reaches the model as a
+ *      result, and still fails a scripted run.
  *
  * Everything runs offline: only the model is faked (the runCompletion seam
  * the other native-tool tests use) — the loop, the boundary, the gate and the
@@ -82,7 +85,9 @@ function makeTurn(turns, { handleAction, dispatchToolCall: dispatch, gate, print
       isWrite,
       onToken: () => {},
       invokeToolCall: gate ?? (async (call) => { gateCalls.push(call); return "mcp result"; }),
-      printw: () => {},
+      // Both channels land in `printed`: an assertion about what the operator
+      // saw has to cover printw and println alike, not just one of them.
+      printw: (s) => { if (s) printed.push(s); },
       DIM: "",
       RST: "",
       println: (...a) => printed.push(a.join("")),
@@ -209,6 +214,69 @@ describe("MCP connected — combined dispatch", () => {
     // Scripted mode has no answer line left: the gate cancels instead of running.
     assert.match(String(out), /^Refused: the operator declined this tool call\./);
     assert.equal(invoked, 0, "the server must not be called before the operator says yes");
+  });
+});
+
+describe("MCP connected — a call that throws (PR review follow-up)", () => {
+  /** How many times `needle` reached the operator, over both print channels. */
+  const shown = (printed, needle) => printed.join("\n").split(needle).length - 1;
+
+  test("a throwing read shows its error once, hands it to the model, and fails the run", async () => {
+    const printed = [];
+    const handled = [];
+    const t = makeTurn(
+      [nativeToolCallTurn({ id: "1", name: "get_balance", arguments: {} }), chatTurn("ok.")],
+      {
+        handleAction: async (action) => { handled.push(action); return "SHOULD NOT HAPPEN"; },
+        dispatchToolCall: async () => { throw new Error("RPC unavailable"); },
+        printed,
+      },
+    );
+    await t.run();
+
+    // Printed by the catch — the read boundary that would have printed it is
+    // the thing that threw, so the operator must not be left guessing.
+    assert.equal(shown(printed, "Error: RPC unavailable"), 1, `expected the error exactly once:\n${printed.join("")}`);
+    // …and handed to the model as the tool result, so it can react.
+    const toolMsg = t.history.findLast((m) => m.role === "tool");
+    assert.equal(toolMsg?.content, "Error: RPC unavailable");
+    assert.deepEqual(handled, [], "a read must not be routed to handleAction");
+    // Still a scripted failure: exit 1 through the real mapping.
+    assert.equal(t.hadFailure.value, true);
+    assert.equal(cli.propagateHadFailure(t.hadFailure, false), true);
+  });
+
+  test("a throwing write boundary shows its error once, hands it to the model, and fails the run", async () => {
+    const printed = [];
+    const dispatched = [];
+    const t = makeTurn(
+      [nativeToolCallTurn({ id: "1", name: "send_mon", arguments: { to: "0x1", amountMon: "1" } }), chatTurn("ok.")],
+      {
+        handleAction: async () => { throw new Error("signer unavailable"); },
+        dispatchToolCall: async (name) => { dispatched.push(name); return "SHOULD NOT HAPPEN"; },
+        printed,
+      },
+    );
+    await t.run();
+
+    assert.equal(shown(printed, "Error: signer unavailable"), 1, `expected the error exactly once:\n${printed.join("")}`);
+    const toolMsg = t.history.findLast((m) => m.role === "tool");
+    assert.equal(toolMsg?.content, "Error: signer unavailable");
+    assert.deepEqual(dispatched, [], "a write must never reach the read fast path");
+    assert.equal(t.hadFailure.value, true);
+    assert.equal(cli.propagateHadFailure(t.hadFailure, false), true);
+  });
+
+  test("a successful read is still printed exactly once, not twice", async () => {
+    const printed = [];
+    const t = makeTurn(
+      [nativeToolCallTurn({ id: "1", name: "get_address", arguments: {} }), chatTurn("ok.")],
+      { printed },
+    );
+    await t.run();
+
+    const toolMsg = t.history.findLast((m) => m.role === "tool");
+    assert.equal(shown(printed, toolMsg.content), 1, "the no-duplicate contract must survive the fix");
   });
 });
 
