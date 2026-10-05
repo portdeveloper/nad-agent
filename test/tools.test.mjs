@@ -410,6 +410,84 @@ test("dispatchToolCall routes calls to the correct handlers", async () => {
   }
 });
 
+/**
+ * A token identifier a model can emit but `String()` cannot read.
+ *
+ * `{"toString": null}` is ordinary JSON. The coercion in `isNativeToken` ran before the
+ * `resolveToken` try/catch, so the throw left `runAction` entirely: `handleAction` printed
+ * `error: …` instead of a refusal, `isRefusal()` read false for what is a rejection, and a
+ * scripted run exited 0 on it. Every alias of the field reaches the same line, so the table
+ * covers all three rather than the one that happened to be reported.
+ */
+const UNREADABLE = { toString: null };
+
+for (const alias of ["token", "symbol", "tokenAddress"]) {
+  test(`get_token_balance refuses an unreadable ${alias} instead of throwing`, async () => {
+    const res = await runAction({ action: "get_token_balance", [alias]: UNREADABLE });
+    assert.equal(isRefusal(res), true, `${alias}: not recognised as a refusal: ${res}`);
+    assert.match(String(res), /^Refused:/);
+    // The value cannot be printed, and safeEcho already says so rather than throwing again.
+    assert.match(String(res), /<unprintable>/);
+  });
+}
+
+test("the native dispatcher refuses an unreadable token the same way", async () => {
+  // Same rejection through the other surface: the schema asks for a string and nothing
+  // enforces it, so the dispatcher hands the object straight to runAction.
+  const res = await dispatchToolCall("get_token_balance", { token: UNREADABLE });
+  assert.equal(isRefusal(res), true, `not recognised as a refusal: ${res}`);
+  assert.match(String(res), /^Refused:/);
+});
+
+test("an unreadable token is refused before any wallet or RPC call", async () => {
+  // With no wallet initialised, anything that reached the wallet would say so. A refusal
+  // instead of that message is how an offline test sees that nothing was called.
+  const res = await runAction({ action: "get_token_balance", token: UNREADABLE });
+  assert.doesNotMatch(String(res), /Wallet not initialized/);
+  assert.doesNotMatch(String(res), /RESERVOIR|rpc|RPC/);
+});
+
+test("a readable token identifier keeps its old answer", async () => {
+  // The controls. MON stays native, an unknown symbol keeps the existing missing-token
+  // message rather than becoming a refusal, and a padded address still resolves.
+  assert.equal(
+    isRefusal(await runAction({ action: "get_token_balance", token: "NOT_A_TOKEN" })),
+    false,
+    "the missing-token answer turned into a refusal",
+  );
+  assert.match(
+    String(await runAction({ action: "get_token_balance", token: "NOT_A_TOKEN" })),
+    /Unknown token "NOT_A_TOKEN"/,
+  );
+  await assert.rejects(
+    runAction({ action: "get_token_balance", token: "MON" }),
+    (err) => /Wallet not initialized/.test(err.message),
+    "MON stopped being treated as the native coin",
+  );
+});
+
+test("native-coin recognition keeps its shape rules", async () => {
+  // The predicate this change rewrote also decides what counts as the chain's own coin, and
+  // that part has to come through untouched. Observable offline: a native identifier reaches
+  // wallet.getBalance() and says the wallet is not initialised, while anything else goes to
+  // token resolution and comes back with the missing-token message.
+  for (const native of ["MON", "mon", " MON ", "Mon", "\tMON\n"]) {
+    await assert.rejects(
+      runAction({ action: "get_token_balance", token: native }),
+      (err) => /Wallet not initialized/.test(err.message),
+      `${JSON.stringify(native)} stopped being read as the native coin`,
+    );
+  }
+  for (const notNative of ["MONX", "XMON", ""]) {
+    const res = await runAction({ action: "get_token_balance", token: notNative });
+    assert.match(
+      String(res),
+      /Unknown token|No built-in token symbols/,
+      `${JSON.stringify(notNative)} was read as the native coin`,
+    );
+  }
+});
+
 test("dispatchToolCall throws on unknown tool names", async () => {
   try {
     await dispatchToolCall("unknown_tool", {});

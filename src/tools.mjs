@@ -56,7 +56,31 @@ export const ACTIONS = {
 };
 
 const SYMBOL = () => config.chain.symbol;
-const isNativeToken = (token) => String(token ?? "").trim().toUpperCase() === SYMBOL();
+/**
+ * Is this identifier the chain's own coin?
+ *
+ * `String()` is not total: it throws for a value whose `toString` is not callable, and
+ * `{"toString": null}` is JSON a model can emit. Such a value is certainly not the native
+ * symbol, so false is the right answer — but it has to be answered rather than thrown,
+ * because both callers are places an exception cannot reach. In get_token_balance this runs
+ * before the `resolveToken` try/catch, so a throw leaves runAction instead of becoming a
+ * refusal. In normalizeParsedAction it runs inside parseAction's "try the next JSON object"
+ * catch, which swallows the throw and drops the whole action to `{action: "none"}` — the
+ * operator asked for a balance and got a chat reply.
+ *
+ * safeEcho already takes this shape of value for the same reason (addressBook.mjs). A
+ * readable value keeps its old answer exactly: the coercion, the trim and the comparison
+ * are unchanged.
+ */
+const isNativeToken = (token) => {
+  let text;
+  try {
+    text = String(token ?? "");
+  } catch {
+    return false;
+  }
+  return text.trim().toUpperCase() === SYMBOL();
+};
 const ADDRESS_RE = /\b0x[0-9a-fA-F]{40}\b/;
 const looksLikeBalanceQuestion = (text) => /\b(balance|bal|holding|holdings)\b/i.test(text);
 const looksLikeNftQuestion = (text) => {
