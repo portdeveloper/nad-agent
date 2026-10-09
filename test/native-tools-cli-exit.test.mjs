@@ -335,6 +335,12 @@ describe("real CLI subprocess — scripted process exit with an injected model",
     assert.match(r.stderr, /Refused: "not-an-address" is not a valid address\./);
   });
 
+  test("an unknown-token balance read exits 1 even after a normal reply", () => {
+    const r = runRealCli("unknown-token");
+    assert.equal(r.status, 1, `expected exit 1, transcript:\n${r.stderr}${r.stdout}`);
+    assert.match(r.stderr + r.stdout, /Refused: Unknown token "NOT_A_TOKEN"/);
+  });
+
   test("SDK toolError exits 1 with code and message intact", () => {
     const r = runRealCli("sdk-error");
     assert.equal(r.status, 1, `expected exit 1, transcript:\n${r.stderr}`);

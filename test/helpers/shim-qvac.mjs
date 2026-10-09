@@ -82,6 +82,18 @@ function nativeEvents(scenario, n) {
         ];
       }
       return [DELTA("Noted.")];
+    case "unknown-token":
+      // A balance read for a token the agent cannot resolve, then an ordinary reply.
+      if (n === 1) {
+        return [
+          {
+            type: "toolCall",
+            seq: 0,
+            call: { id: "shim_t1", name: "get_token_balance", arguments: { token: "NOT_A_TOKEN" } },
+          },
+        ];
+      }
+      return [DELTA("Here is what I found.")];
     case "ok":
     default:
       if (n === 1) {
