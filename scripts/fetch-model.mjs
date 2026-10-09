@@ -33,7 +33,7 @@ export class GGUFDownloader {
    *
    * Strategy:
    *  1. If a partial file exists, try a Range request.
-   *  2. Validate the server's response (206 = resume OK, 200 = no resume, 416 = can't resume).
+   *  2. Validate the response; a matching end-of-file 416 permits one full GET.
    *  3. Stream to disk, appending if resuming.
    *  4. Verify file size against total from Content-Range (or Content-Length).
    *  5. Verify MD5 if the server sent Content-MD5.
@@ -42,6 +42,7 @@ export class GGUFDownloader {
     const hasPartial = existsSync(this.filePath);
     const existingSize = hasPartial ? statSync(this.filePath).size : 0;
     let res;
+    let retriedFresh = false;
 
     if (hasPartial && existingSize > 0) {
       res = await fetchFn("GET", undefined, {
@@ -49,6 +50,22 @@ export class GGUFDownloader {
       });
     } else {
       res = await fetchFn("GET", undefined, {});
+    }
+
+    if (hasPartial && existingSize > 0 && res.status === 416) {
+      const range = res.headers.get("Content-Range");
+      const totalMatch = range?.match(/^bytes \*\/(\d+)$/);
+      const total = totalMatch ? Number(totalMatch[1]) : NaN;
+      if (Number.isSafeInteger(total) && total === existingSize) {
+        // Equal length does not validate local bytes. Discard this error body
+        // and require one full response before replacing and verifying the file.
+        await res.body?.cancel();
+        res = await fetchFn("GET", undefined, {});
+        if (res.status !== 200) {
+          throw new ResumeCheckFailed(`expected 200 for fresh download after 416, got ${res.status}`);
+        }
+        retriedFresh = true;
+      }
     }
 
     const contentLength = Number(res.headers.get("Content-Length") || 0);
@@ -83,7 +100,7 @@ export class GGUFDownloader {
       if (res.status === 206) {
         // resume validated above
       } else if (res.status === 200) {
-        console.warn(`server doesn't support resume; starting fresh download`);
+        if (!retriedFresh) console.warn(`server doesn't support resume; starting fresh download`);
       } else if (res.status === 416) {
         throw new ResumeCheckFailed(
           `server returned 416 (Range Not Satisfiable); partial may be corrupt, delete ${this.filePath} and retry`,
@@ -100,7 +117,7 @@ export class GGUFDownloader {
     // --- Stream to disk (with inline MD5 hash) ---
     const writeMode = (hasPartial && existingSize > 0 && res.status === 206) ? "a" : "w";
     const body = Readable.fromWeb(res.body);
-    let received = existingSize;
+    let received = retriedFresh ? 0 : existingSize;
 
     await new Promise((resolve, reject) => {
       const ws = createWriteStream(this.filePath, { flags: writeMode });
@@ -117,11 +134,14 @@ export class GGUFDownloader {
 
     if (this.progress && contentLength) {
       process.stdout.write(`\n`);
-      this._reportProgress(100);
     }
 
     // --- Verify ---
     if (totalFileSize) await this.verifyFile({ contentLength: String(totalFileSize), checksum: md5Checksum });
+
+    if (this.progress && contentLength) {
+      this._reportProgress(100);
+    }
   }
 
   /**

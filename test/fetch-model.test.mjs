@@ -242,6 +242,191 @@ describe("GGUFDownloader — fallback to fresh download", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GGUFDownloader — one full retry after a recognized end-of-file 416
+// ---------------------------------------------------------------------------
+
+describe("GGUFDownloader — completed download retry", () => {
+  function fixture(t, oldBody = BODY, progress = false) {
+    const file = path("completed-retry");
+    writeFileSync(file, oldBody);
+    t.after(() => cleanup(file));
+    const outputs = [];
+    const calls = [];
+    const dl = new GGUFDownloader(file, { progress, onProgress: (pct) => outputs.push(pct) });
+    const endOfFile = () => fakeResponse({
+      status: 416,
+      extraHeaders: { "Content-Range": `bytes */${oldBody.length}` },
+    });
+    const fetchSequence = (...responses) => async (...args) => {
+      calls.push(args);
+      assert.ok(calls.length <= responses.length, "must not request another retry");
+      const response = responses[calls.length - 1];
+      if (response instanceof Error) throw response;
+      return response;
+    };
+    const assertRetry = () => assert.deepEqual(calls, [
+      ["GET", undefined, { headers: { Range: `bytes=${oldBody.length}-` } }],
+      ["GET", undefined, {}],
+    ]);
+    return { file, dl, outputs, calls, endOfFile, fetchSequence, assertRetry };
+  }
+
+  it("re-downloads a completed file on rerun with exactly one GET without Range", async (t) => {
+    const file = path("completed-rerun");
+    cleanup(file);
+    t.after(() => cleanup(file));
+    const calls = [];
+    const dl = new GGUFDownloader(file, { progress: false });
+    await dl.download(async (...args) => {
+      calls.push(args);
+      return fakeResponse({ contentMD5: md5Of(BODY) });
+    });
+    await dl.download(async (...args) => {
+      calls.push(args);
+      assert.ok(calls.length <= 3, "retry must be bounded");
+      return calls.length === 2
+        ? fakeResponse({ status: 416, extraHeaders: { "Content-Range": `bytes */${BODY.length}` } })
+        : fakeResponse({ contentMD5: md5Of(BODY) });
+    });
+    assert.deepEqual(calls, [
+      ["GET", undefined, {}],
+      ["GET", undefined, { headers: { Range: `bytes=${BODY.length}-` } }],
+      ["GET", undefined, {}],
+    ]);
+    assert.deepEqual(readFileSync(file), BODY);
+  });
+
+  for (const [name, oldBody, newBody] of [
+    ["corrupt same-size bytes", Buffer.alloc(BODY.length), BODY],
+    ["changed same-size remote bytes", BODY, Buffer.alloc(BODY.length, "x")],
+    ["a changed remote length", BODY, Buffer.from("a different full response")],
+  ]) {
+    it(`replaces ${name} and ignores the 416 body, length and MD5`, async (t) => {
+      const f = fixture(t, oldBody);
+      await f.dl.download(f.fetchSequence(
+        fakeResponse({
+          status: 416,
+          body: Buffer.from("416 error body must not enter the model file"),
+          contentLength: 999,
+          contentMD5: "AAAAAAAAAAAAAAAAAAAAAA==",
+          extraHeaders: { "Content-Range": `bytes */${oldBody.length}` },
+        }),
+        fakeResponse({ body: newBody, contentLength: newBody.length, contentMD5: md5Of(newBody) }),
+      ));
+      f.assertRetry();
+      assert.deepEqual(readFileSync(f.file), newBody);
+    });
+  }
+
+  for (const range of [
+    null, "bytes */*", `bytes */${BODY.length + 1}`, "bytes */0",
+    "bytes */9007199254740992", "bytes */999999999999999999999999999999999999",
+    `bytes 0-${BODY.length - 1}/${BODY.length}`, `bytes */${BODY.length}junk`,
+    `bytes */+${BODY.length}`, `bytes */${BODY.length}.0`,
+    `items */${BODY.length}`, `bytes  */${BODY.length}`, `bytes */ ${BODY.length}`,
+  ]) {
+    it(`rejects an unrecognized 416 Content-Range ${JSON.stringify(range)} without retry or write`, async (t) => {
+      const f = fixture(t, BODY, true);
+      const extraHeaders = range === null ? {} : { "Content-Range": range };
+      await assert.rejects(f.dl.download(f.fetchSequence(fakeResponse({ status: 416, extraHeaders }))), ResumeCheckFailed);
+      assert.equal(f.calls.length, 1);
+      assert.deepEqual(readFileSync(f.file), BODY);
+      assert.deepEqual(f.outputs, []);
+    });
+  }
+
+  it("does not enable the retry for an empty existing file", async (t) => {
+    const f = fixture(t, Buffer.alloc(0), true);
+    await assert.rejects(f.dl.download(f.fetchSequence(f.endOfFile())), FetchFailed);
+    assert.deepEqual(f.calls, [["GET", undefined, {}]]);
+    assert.equal(statSync(f.file).size, 0);
+    assert.deepEqual(f.outputs, []);
+  });
+
+  it("propagates a failed fresh fetch without writing or reporting completion", async (t) => {
+    const f = fixture(t, BODY, true);
+    const failure = new Error("fresh fetch failed");
+    await assert.rejects(f.dl.download(f.fetchSequence(f.endOfFile(), failure)), (err) => err === failure);
+    f.assertRetry();
+    assert.deepEqual(readFileSync(f.file), BODY);
+    assert.deepEqual(f.outputs, []);
+  });
+
+  it("propagates a rejected 416 body cancellation without fetching, writing or reporting completion", async (t) => {
+    const f = fixture(t, BODY, true);
+    const failure = new Error("416 body cancellation failed");
+    const body = new ReadableStream({ cancel() { throw failure; } });
+    const response = fakeResponse({ status: 416, body, extraHeaders: { "Content-Range": `bytes */${BODY.length}` } });
+    await assert.rejects(f.dl.download(f.fetchSequence(response)), (err) => err === failure);
+    assert.equal(f.calls.length, 1);
+    assert.deepEqual(readFileSync(f.file), BODY);
+    assert.deepEqual(f.outputs, []);
+  });
+
+  for (const status of [206, 201, 204, 304, 416, 500]) {
+    it(`rejects fresh status ${status} before writing and never retries again`, async (t) => {
+      const f = fixture(t, BODY, true);
+      const response = fakeResponse({
+        status,
+        body: status === 204 || status === 304 ? null : Buffer.from("bad response"),
+        extraHeaders: { "Content-Range": `bytes ${BODY.length}-${BODY.length + 11}/${BODY.length + 12}` },
+      });
+      await assert.rejects(f.dl.download(f.fetchSequence(f.endOfFile(), response)), ResumeCheckFailed);
+      f.assertRetry();
+      assert.deepEqual(readFileSync(f.file), BODY);
+      assert.deepEqual(f.outputs, []);
+    });
+  }
+
+  it("propagates a failing fresh body stream without reporting completion", async (t) => {
+    const f = fixture(t, BODY, true);
+    const failure = new Error("fresh stream failed");
+    const body = new ReadableStream({ start(controller) { controller.error(failure); } });
+    await assert.rejects(f.dl.download(f.fetchSequence(f.endOfFile(), fakeResponse({ body }))), /fresh stream failed/);
+    f.assertRetry();
+    assert.deepEqual(f.outputs, []);
+  });
+
+  it("rejects a missing fresh body without reporting completion", async (t) => {
+    const f = fixture(t, BODY, true);
+    await assert.rejects(f.dl.download(f.fetchSequence(f.endOfFile(), fakeResponse({ body: null }))), TypeError);
+    f.assertRetry();
+    assert.deepEqual(f.outputs, []);
+  });
+
+  for (const [name, response, message] of [
+    ["size", () => fakeResponse({ contentLength: BODY.length + 1 }), /Content-Length mismatch/],
+    ["MD5", () => fakeResponse({ contentMD5: "AAAAAAAAAAAAAAAAAAAAAA==" }), /MD5 mismatch/],
+  ]) {
+    it(`fails fresh ${name} verification without reporting completion`, async (t) => {
+      const f = fixture(t, BODY, true);
+      await assert.rejects(f.dl.download(f.fetchSequence(f.endOfFile(), response())), (err) => {
+        assert.ok(err instanceof IntegrityError);
+        assert.match(err.message, message);
+        return true;
+      });
+      f.assertRetry();
+      assert.deepEqual(f.outputs, []);
+    });
+  }
+
+  it("reports completion only after the fresh file has passed verification", async (t) => {
+    const f = fixture(t, BODY, true);
+    const verifyFile = f.dl.verifyFile.bind(f.dl);
+    let verified = false;
+    f.dl.verifyFile = async (opts) => {
+      assert.deepEqual(f.outputs, []);
+      await verifyFile(opts);
+      verified = true;
+    };
+    await f.dl.download(f.fetchSequence(f.endOfFile(), fakeResponse({ contentMD5: md5Of(BODY) })));
+    f.assertRetry();
+    assert.equal(verified, true);
+    assert.deepEqual(f.outputs, ["100.0%"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GGUFDownloader — Content-MD5 verification
 // ---------------------------------------------------------------------------
 
