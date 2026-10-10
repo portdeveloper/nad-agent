@@ -988,7 +988,9 @@ export async function runAction(a, resolved, opts = {}) {
         return `Refused: invalid token "${safeEcho(input)}": ${safeEcho(detail)}`;
       }
       if (!token) {
-        return unknownTokenMessage(input);
+        // A refusal, as on the send path: the read did not happen, and scripted
+        // callers detect that with isRefusal(). The known-symbol hint stays.
+        return `Refused: ${unknownTokenMessage(input)}`;
       }
 
       let { symbol, decimals, name } = token;

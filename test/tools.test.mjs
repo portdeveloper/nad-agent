@@ -336,7 +336,10 @@ test("unknown token balance errors explain when the catalog is empty", async () 
   KNOWN_TOKENS.testnet = {};
   try {
     const result = await runAction({ action: "get_token_balance", token: "USDC" });
-    assert.equal(result, "No built-in token symbols are configured for Monad Testnet. Use a token contract address.");
+    assert.equal(
+      result,
+      "Refused: No built-in token symbols are configured for Monad Testnet. Use a token contract address.",
+    );
   } finally {
     KNOWN_TOKENS.testnet = previousCatalog;
   }
@@ -448,12 +451,12 @@ test("an unreadable token is refused before any wallet or RPC call", async () =>
 });
 
 test("a readable token identifier keeps its old answer", async () => {
-  // The controls. MON stays native, an unknown symbol keeps the existing missing-token
-  // message rather than becoming a refusal, and a padded address still resolves.
+  // The controls. MON stays native, an unknown symbol keeps its missing-token guidance
+  // (now as a refusal, see the test below), and a padded address still resolves.
   assert.equal(
     isRefusal(await runAction({ action: "get_token_balance", token: "NOT_A_TOKEN" })),
-    false,
-    "the missing-token answer turned into a refusal",
+    true,
+    "the missing-token answer is not a refusal",
   );
   assert.match(
     String(await runAction({ action: "get_token_balance", token: "NOT_A_TOKEN" })),
@@ -464,6 +467,22 @@ test("a readable token identifier keeps its old answer", async () => {
     (err) => /Wallet not initialized/.test(err.message),
     "MON stopped being treated as the native coin",
   );
+});
+
+test("an unknown token is a refusal on both balance paths, with its guidance kept", async () => {
+  // The send path already says "Refused:" for a token it cannot resolve; a balance read did
+  // not, so a scripted caller checking isRefusal() treated the failed read as an answer.
+  for (const token of ["NOT_A_TOKEN", "", 0, false]) {
+    const label = JSON.stringify(token);
+    for (const [path, out] of [
+      ["runAction", await runAction({ action: "get_token_balance", token })],
+      ["native dispatch", await dispatchToolCall("get_token_balance", { token })],
+    ]) {
+      assert.equal(isRefusal(out), true, `${path} ${label} is not a refusal: ${out}`);
+      assert.match(String(out), /Use a token contract address/, `${path} ${label} lost its hint`);
+      assert.match(String(out), /Known testnet symbols: USDC, WETH, WMON/, `${path} ${label}`);
+    }
+  }
 });
 
 test("native-coin recognition keeps its shape rules", async () => {
