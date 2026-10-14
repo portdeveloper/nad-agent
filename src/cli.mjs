@@ -453,16 +453,16 @@ async function handleSlash(line) {
       try {
         const entries = await wallet.getHistory();
         if (!entries.length) {
-          println("  no recent transactions found.\n");
+          console.log("  no recent transactions found.\n");
           return true;
         }
-        println("  " + c.violet(c.bold("recent transactions")));
+        console.log("  " + c.violet(c.bold("recent transactions")));
         for (const tx of entries) {
           const sign = tx.direction === "out" ? "-" : "+";
-          println(`  ${tx.direction.padEnd(3)} ${sign}${formatMon(tx.amount)} ${config.chain.symbol}  ${tx.hash}` +
+          console.log(`  ${tx.direction.padEnd(3)} ${sign}${formatMon(tx.amount)} ${config.chain.symbol}  ${tx.hash}` +
             (tx.explorerUrl ? `\n       ${tx.explorerUrl}` : ""));
         }
-        println("");
+        console.log("");
       } catch (err) {
         println(c.red(`  history error: ${err.message}`) + "\n");
         if (SCRIPTED) hadFailure = true;
