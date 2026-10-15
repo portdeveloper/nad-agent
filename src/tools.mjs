@@ -396,7 +396,16 @@ export async function prepareTokenSend(
   if (!resolved.ok) return resolved;
 
   const input = tokenInput(a);
-  if (!String(input).trim()) {
+  // String() throws on an object that cannot become text — `{"toString": null}` in a native tool
+  // call's arguments. That is not an empty token, so let it reach resolveToken, whose catch below
+  // refuses it with a reason: the answer the read path has given since #123.
+  let blank;
+  try {
+    blank = !String(input).trim();
+  } catch {
+    blank = false;
+  }
+  if (blank) {
     return { ok: false, reason: "no token specified. Use a symbol (e.g. USDC) or contract address." };
   }
 

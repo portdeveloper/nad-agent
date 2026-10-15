@@ -344,6 +344,42 @@ describe("prepareTokenSend", () => {
     assert.equal(result.ok, false);
     assert.match(result.reason, /valid token amount/);
   });
+
+  // Issue #130: native tool calling hands the model's arguments over as parsed JSON, so a token
+  // can be an object String() cannot convert. The empty check used to throw on it, and the loop
+  // reported a JavaScript error instead of a refusal.
+  describe("an identifier that cannot be read as text (#130)", () => {
+    const send = (token) => ({ action: "send_token", token, to: DEAD, amount: "1" });
+    // Fails the test instead of passing silently if the refusal path ever stops before metadata.
+    const noMetadata = async () => assert.fail("metadata must not be read for an unreadable identifier");
+
+    for (const [label, token] of [
+      ['{"toString": null}', JSON.parse('{"toString": null}')],
+      ["an object with no prototype", Object.create(null)],
+    ]) {
+      test(`refuses ${label} with the read path's reason`, async () => {
+        const result = await prepareTokenSend(send(token), { getMetadata: noMetadata });
+
+        assert.equal(result.ok, false);
+        assert.equal(result.reason, 'invalid token "<unprintable>": Cannot convert object to primitive value');
+      });
+    }
+
+    test("still treats a blank identifier as no token at all", async () => {
+      for (const token of ["", "   "]) {
+        const result = await prepareTokenSend(send(token), { getMetadata: noMetadata });
+        assert.equal(result.ok, false);
+        assert.match(result.reason, /^no token specified/);
+      }
+    });
+
+    test("still prepares a readable identifier", async () => {
+      const result = await prepareTokenSend(send("USDC"));
+
+      assert.equal(result.ok, true);
+      assert.equal(result.token.symbol, "USDC");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
