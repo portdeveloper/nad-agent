@@ -58,7 +58,16 @@ if (process.env.RESERVOIR_API_URL) chain.reservoirUrl = process.env.RESERVOIR_AP
 
 const pimlicoKey = process.env.PIMLICO_API_KEY || "";
 const sponsorshipPolicyId = process.env.PIMLICO_SPONSORSHIP_POLICY_ID || "";
-const gasOverride = (process.env.WDK_GAS_MODE || "").toLowerCase();
+// WDK_GAS_MODE takes the three values .env.example documents. Anything else is refused at
+// startup instead of read as "sponsored": with a Pimlico key that fallthrough broadcast, so a
+// typo of dry-run was the thing that turned broadcasting on.
+const GAS_MODES = ["dry-run", "native", "sponsored"];
+const gasOverride = (process.env.WDK_GAS_MODE || "").trim().toLowerCase();
+const gasModeError =
+  gasOverride && !GAS_MODES.includes(gasOverride)
+    ? `WDK_GAS_MODE=${JSON.stringify(process.env.WDK_GAS_MODE)} is not a gas mode: ` +
+      `use dry-run, native or sponsored, or leave it empty to auto-detect`
+    : null;
 
 // NFT reads (get_nfts) go through Reservoir's indexed API, not raw eth_getLogs:
 // Monad prunes historical state, so Transfer-event scanning is unreliable. The host
@@ -72,7 +81,9 @@ const reservoirUrl = chain.reservoirUrl;
 //   sponsored -> gasless via Pimlico paymaster (agent pays 0)
 //   native    -> you-pay-gas in MON (still needs a bundler = Pimlico key)
 let gasMode;
-if (gasOverride === "dry-run" || !pimlicoKey) gasMode = "dry-run";
+// A refused value resolves to dry-run as well, so an entry point that never looks at
+// gasModeError still cannot broadcast on it.
+if (gasModeError || gasOverride === "dry-run" || !pimlicoKey) gasMode = "dry-run";
 else if (gasOverride === "native") gasMode = "native";
 else gasMode = "sponsored";
 
@@ -151,6 +162,8 @@ export const config = {
   // Convenience flag for guardrails: mainnet moves real funds.
   isMainnet: network === "mainnet",
   gasMode,
+  // Set when WDK_GAS_MODE holds an unrecognised value; the CLI refuses to start on it.
+  gasModeError,
   slippagePercent,
   sponsorshipPolicyId,
   // ERC-4337 needs a bundler+paymaster. For a LOCAL CLI the Pimlico key stays on

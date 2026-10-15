@@ -529,6 +529,13 @@ async function main() {
   // inherits fd 0 when it spawns; by then the input must already be ours.
   if (SCRIPTED) scriptLines = await readScriptLines();
 
+  // An unrecognised gas mode stops the agent before anything is shown or initialised: the
+  // operator asked for a mode, and none of the three is a safe guess at what they meant.
+  if (config.gasModeError) {
+    println(c.red(`   gas mode: ${config.gasModeError}`) + "\n");
+    process.exit(1);
+  }
+
   banner();
 
   // A malformed policy must stop the agent before any send, never be ignored.
